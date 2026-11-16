@@ -34,8 +34,10 @@ import {
   WorkspaceBreadcrumbSeparator,
 } from "../WorkspaceBreadcrumb";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
-import { moveTaskToDone } from "./moveTaskToDone";
+import { confirmLeavingDone } from "./moveTaskToDone";
+import { leavingDoneConfirmation } from "./taskCleanup.logic";
 import { TaskCard, type TaskCardActions } from "./TaskCard";
+import { useMoveTaskToDone } from "./TaskCleanupDialog";
 import { toastTaskCommandFailure, toastTaskStartBlocked } from "./taskCommandToast";
 import { taskStartBlocker } from "./taskDetail.logic";
 import { taskAttention, type TaskAttention } from "./taskAttention.logic";
@@ -165,11 +167,18 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
     label: "task unarchive",
   });
   const deleteTask = useAtomCommand(tasksEnvironment.deleteTask, { label: "task delete" });
+  const { moveToDone, cleanupDialog } = useMoveTaskToDone();
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
 
   const move = async (entry: BoardTask, status: TaskStatus) => {
     const { environmentId, task } = entry;
     if (status === task.status) return;
+    // Checked before any await, so a move that needs no confirmation is sent at once.
+    const leavingDone = leavingDoneConfirmation(task, status);
+    if (leavingDone !== null && !(await confirmLeavingDone(leavingDone))) {
+      setKeyboardMovedKey(null);
+      return;
+    }
     // A task without chats starts through the dialog; one that already has chats only moves.
     if (task.status === "backlog" && status === "in_progress" && task.threadIds.length === 0) {
       setKeyboardMovedKey(null);
@@ -187,7 +196,7 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
     }
     const result =
       status === "done"
-        ? await moveTaskToDone({ environmentId, task, deps: { setTaskStatus } })
+        ? await moveToDone(environmentId, task)
         : await setTaskStatus({ environmentId, input: { id: task.id, status } });
     // A card that stays in its column keeps its focus; nothing remounts to take it back.
     if (toastTaskCommandFailure("Не удалось перенести задачу", result)) setKeyboardMovedKey(null);
@@ -423,6 +432,7 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
           onClose={() => setStarting(null)}
         />
       ) : null}
+      {cleanupDialog}
     </SidebarInset>
   );
 }

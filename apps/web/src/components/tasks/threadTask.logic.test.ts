@@ -1,0 +1,66 @@
+import { ProjectId, TaskId, ThreadId, type Task, type TaskWorktree } from "@t3tools/contracts";
+import { describe, expect, it } from "vite-plus/test";
+
+import { liveTaskWorktreePaths, taskChipLabel, threadTaskIndex } from "./threadTask.logic";
+
+const backend = ProjectId.make("project-backend");
+
+const taskWorktree = (overrides: Partial<TaskWorktree>): TaskWorktree => ({
+  projectId: backend,
+  branch: "task/card-pay",
+  baseRef: "origin/main",
+  kind: "shared",
+  worktreePath: "/work/wt/card-pay",
+  removedAt: null,
+  branchDeletedAt: null,
+  ...overrides,
+});
+
+const makeTask = (overrides: Partial<Task>): Task => ({
+  id: TaskId.make("task:pay"),
+  title: "Оплата картой",
+  description: "",
+  link: null,
+  status: "done",
+  primaryProjectId: backend,
+  projectIds: [backend],
+  worktrees: [],
+  threadIds: [],
+  sortKey: 1,
+  createdAt: "2026-11-01T00:00:00.000Z",
+  updatedAt: "2026-11-01T00:00:00.000Z",
+  startedAt: "2026-11-02T00:00:00.000Z",
+  completedAt: "2026-11-03T00:00:00.000Z",
+  archivedAt: null,
+  ...overrides,
+});
+
+describe("liveTaskWorktreePaths", () => {
+  it("lists the worktrees no cleanup removed yet", () => {
+    const task = makeTask({
+      worktrees: [
+        taskWorktree({}),
+        taskWorktree({ worktreePath: "/work/wt/gone", removedAt: "2026-11-03T00:00:00.000Z" }),
+        taskWorktree({ worktreePath: null }),
+      ],
+    });
+    expect(liveTaskWorktreePaths([task])).toEqual(["/work/wt/card-pay"]);
+  });
+});
+
+describe("threadTaskIndex", () => {
+  it("maps each task chat to its task", () => {
+    const task = makeTask({ threadIds: [ThreadId.make("thread-a"), ThreadId.make("thread-b")] });
+    const index = threadTaskIndex([task]);
+    expect(index.get(ThreadId.make("thread-b"))).toBe(task);
+    expect(index.get(ThreadId.make("thread-c"))).toBeUndefined();
+  });
+});
+
+describe("taskChipLabel", () => {
+  it("keeps short titles and cuts long ones to 12 characters", () => {
+    expect(taskChipLabel("Оплата")).toBe("Оплата");
+    expect(taskChipLabel("Оплата картой")).toBe("Оплата карт…");
+    expect(Array.from(taskChipLabel("Оплата картой в приложении"))).toHaveLength(12);
+  });
+});

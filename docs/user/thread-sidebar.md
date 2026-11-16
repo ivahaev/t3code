@@ -339,3 +339,25 @@ A snoozed thread keeps working and stays hidden until its wake time, even while
 its agent wakes itself for background work. It comes back early for an approval,
 a new question, a failed run, or a message or answer you send. You can snooze an existing
 question and answer when the thread wakes; the question stays unanswered.
+
+## Tasks
+
+A task groups the threads that work on one piece of work, across one or more projects,
+on a board with four columns: **Бэклог**, **В работе**, **Ревью**, and **Готово**. Open
+it with **Задачи** in the sidebar or the command palette. Choose **В работу** on a backlog
+task to create its worktree on a `task/…` branch from the project's default branch and
+start its first thread from the task's description. Later threads can share that worktree
+or get their own, branched from the task's branch. A thread in a task shows the task's
+name in the sidebar; click it to open the task.
+
+When a task moves to **Готово**, T3 Code offers to remove its worktrees and local
+branches. Clean worktrees and merged branches are checked; worktrees with uncommitted
+files and unmerged branches are removed only if you check them. Branches on the remote
+are never touched, and the task's threads stay. Choose whether to ask, always clean up,
+or never offer in **Settings → Задачи**. **Всегда** removes only clean worktrees and
+merged branches and asks about the rest.
+
+If you move a task out of **Готово** after its branch was deleted, its next thread
+creates the branch again from the default branch. Deleting a thread never removes a
+worktree its task still uses, and deleting a task keeps its threads, worktrees, and
+branches.

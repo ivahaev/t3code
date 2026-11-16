@@ -5,6 +5,8 @@ import type { ThreadShell } from "./types";
 export function getOrphanedWorktreePathForThread(
   threads: ReadonlyArray<Pick<ThreadShell, "id" | "worktreePath">>,
   threadId: ThreadShell["id"],
+  /** Worktrees a task keeps; its cleanup on Done removes them, not a deleted chat. */
+  taskWorktreePaths: ReadonlyArray<string> = [],
 ): string | null {
   const targetThread = threads.find((thread) => thread.id === threadId);
   if (!targetThread) {
@@ -26,7 +28,11 @@ export function getOrphanedWorktreePathForThread(
       normalizeProjectPathForComparison(thread.worktreePath) === targetKey,
   );
 
-  return isShared ? null : targetWorktreePath;
+  const isTaskWorktree = taskWorktreePaths.some(
+    (path) => normalizeProjectPathForComparison(path) === targetKey,
+  );
+
+  return isShared || isTaskWorktree ? null : targetWorktreePath;
 }
 
 export function formatWorktreePathForDisplay(worktreePath: string): string {

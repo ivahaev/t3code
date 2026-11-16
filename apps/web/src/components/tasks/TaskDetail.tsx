@@ -49,10 +49,12 @@ import {
   WorkspaceBreadcrumbSeparator,
 } from "../WorkspaceBreadcrumb";
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
-import { moveTaskToDone } from "./moveTaskToDone";
+import { confirmLeavingDone } from "./moveTaskToDone";
+import { leavingDoneConfirmation } from "./taskCleanup.logic";
 import { TaskAttachThreadDialog } from "./TaskAttachThreadDialog";
 import { taskAttention, taskAttentionLabel } from "./taskAttention.logic";
 import { TASK_STATUS_LABEL, TASK_STATUSES } from "./taskBoard.logic";
+import { useMoveTaskToDone } from "./TaskCleanupDialog";
 import { TaskCodeTab, type TaskWorktreeDiff } from "./TaskCodeTab";
 import { toastTaskCommandFailure, toastTaskStartBlocked } from "./taskCommandToast";
 import {
@@ -202,8 +204,11 @@ function TaskDetailBody({
   const unarchiveTask = useAtomCommand(tasksEnvironment.unarchiveTask, {
     label: "task unarchive",
   });
+  const { moveToDone, cleanupDialog } = useMoveTaskToDone();
   const changeStatus = async (status: TaskStatus) => {
     if (status === task.status) return;
+    const leavingDone = leavingDoneConfirmation(task, status);
+    if (leavingDone !== null && !(await confirmLeavingDone(leavingDone))) return;
     // The same rule as the board: a task without chats starts through the dialog.
     if (task.status === "backlog" && status === "in_progress" && task.threadIds.length === 0) {
       if (startBlocker === null) setDialog("start");
@@ -212,7 +217,7 @@ function TaskDetailBody({
     }
     const result =
       status === "done"
-        ? await moveTaskToDone({ environmentId, task, deps: { setTaskStatus } })
+        ? await moveToDone(environmentId, task)
         : await setTaskStatus({ environmentId, input: { id: task.id, status } });
     toastTaskCommandFailure("Не удалось перенести задачу", result);
   };
@@ -372,6 +377,7 @@ function TaskDetailBody({
           onClose={() => setDialog(null)}
         />
       ) : null}
+      {cleanupDialog}
     </>
   );
 }

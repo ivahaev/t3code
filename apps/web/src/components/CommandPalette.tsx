@@ -76,6 +76,7 @@ import {
   PinIcon,
   PinOffIcon,
   PlugIcon,
+  SquareKanbanIcon,
   SquarePenIcon,
   TextSearchIcon,
   UserPlusIcon,
@@ -1658,6 +1659,17 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:tasks",
+    searchTerms: ["задачи", "tasks", "board", "kanban", "доска"],
+    title: "Задачи",
+    icon: <SquareKanbanIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      await navigate({ to: "/tasks" });
+    },
+  });
 
   actionItems.push({
     kind: "action",

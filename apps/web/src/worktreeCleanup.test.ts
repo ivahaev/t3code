@@ -74,6 +74,17 @@ describe("getOrphanedWorktreePathForThread", () => {
     );
   });
 
+  it("returns null for a worktree a task still keeps", () => {
+    const threads = [
+      makeThread({ id: ThreadId.make("thread-1"), worktreePath: "/tmp/repo/worktrees/task-a" }),
+    ];
+    expect(
+      getOrphanedWorktreePathForThread(threads, ThreadId.make("thread-1"), [
+        "/tmp/repo/worktrees/task-a/",
+      ]),
+    ).toBeNull();
+  });
+
   it("ignores threads linked to different worktrees", () => {
     const threads = [
       makeThread({
