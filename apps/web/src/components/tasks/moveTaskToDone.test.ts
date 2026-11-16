@@ -102,7 +102,11 @@ describe("moveTaskToDone", () => {
     await run("always");
     expect(deps.cleanupTask).toHaveBeenCalledExactlyOnceWith({
       environmentId,
-      input: { id: task.id, worktreePaths: ["/work/clean"], branches: [] },
+      input: {
+        id: task.id,
+        worktrees: [{ path: "/work/clean", acceptedDirtyFileCount: 0 }],
+        branches: [],
+      },
     });
     expect(toasts).toEqual([
       expect.objectContaining({ type: "success", title: "Удалено 1 worktree, 0 веток" }),

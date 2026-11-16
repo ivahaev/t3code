@@ -95,6 +95,8 @@ export interface CleanupPath {
   readonly foreign: boolean;
   /** The project's main checkout. */
   readonly mainCheckout: boolean;
+  /** An agent of the task is running there now. */
+  readonly running: boolean;
 }
 
 /** What cleanup must know about one project of the task. */

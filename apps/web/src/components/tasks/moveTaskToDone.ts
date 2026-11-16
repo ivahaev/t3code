@@ -73,7 +73,7 @@ export async function moveTaskToDone(input: {
     return moved;
   }
   const plan = autoCleanupPlan(preview.value);
-  if (plan.silent.worktreePaths.length > 0 || plan.silent.branches.length > 0) {
+  if (plan.silent.worktrees.length > 0 || plan.silent.branches.length > 0) {
     const cleaned = await deps.cleanupTask({
       environmentId,
       input: { id: task.id, ...plan.silent },

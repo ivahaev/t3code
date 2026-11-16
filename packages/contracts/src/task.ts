@@ -121,7 +121,10 @@ export type TaskCleanupPreviewInput = typeof TaskCleanupPreviewInput.Type;
 
 export const TaskCleanupInput = Schema.Struct({
   id: TaskId,
-  worktreePaths: Schema.Array(Schema.String),
+  /** The worktrees to remove, each with the uncommitted file count the user saw and accepted. */
+  worktrees: Schema.Array(
+    Schema.Struct({ path: Schema.String, acceptedDirtyFileCount: NonNegativeInt }),
+  ),
   branches: Schema.Array(
     Schema.Struct({ projectId: ProjectId, branch: Schema.String, force: Schema.Boolean }),
   ),

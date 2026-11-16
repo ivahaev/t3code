@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -86,13 +87,15 @@ const shell = (
   worktreePath: string | null,
   branch: string | null,
   archivedAt: string | null = null,
+  activeRunId: string | null = null,
 ) =>
   ({
     id: ThreadId.make(id),
     projectId: p1,
     worktreePath,
     branch,
-    status: "idle",
+    status: activeRunId === null ? "idle" : "running",
+    activeRunId,
     lastError: null,
     deletedAt: null,
     archivedAt,
@@ -145,6 +148,7 @@ const tasksLayer = (repo: string, shells: ReadonlyArray<OrchestrationV2ThreadShe
       Layer.mergeAll(
         TaskStore.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamDomainEvents: Stream.never,
           getThreadShell: (threadId) =>
             Effect.succeed(shells.find((candidate) => candidate.id === threadId) ?? null),
           getShellSnapshot: () =>
@@ -221,7 +225,7 @@ it.live("cleanup removes the worktree and its merged branch and marks both", () 
       // Only the branch is selected: its worktree goes first, since Git needs that.
       const result = yield* tasks.cleanup({
         id: task.id,
-        worktreePaths: [],
+        worktrees: [],
         branches: [{ projectId: p1, branch: "task/a", force: false }],
       });
       assert.strictEqual(result.removedWorktrees, 1);
@@ -249,7 +253,7 @@ it.live("cleanup of a folder and a branch that are already gone succeeds and mar
       const task = yield* seedTask([worktree("task/gone", gonePath)]);
       const result = yield* tasks.cleanup({
         id: task.id,
-        worktreePaths: [gonePath],
+        worktrees: [{ path: gonePath, acceptedDirtyFileCount: 0 }],
         branches: [{ projectId: p1, branch: "task/gone", force: false }],
       });
       assert.strictEqual(result.removedWorktrees, 1);
@@ -287,18 +291,34 @@ it.live("cleanup leaves out and refuses what a thread outside the task uses", ()
         ["task/a"],
       );
       const refusals = yield* Effect.all([
-        tasks.cleanup({ id: task.id, worktreePaths: [sharedPath], branches: [] }).pipe(Effect.flip),
         tasks
-          .cleanup({ id: task.id, worktreePaths: [archivedPath], branches: [] })
+          .cleanup({
+            id: task.id,
+            worktrees: [{ path: sharedPath, acceptedDirtyFileCount: 0 }],
+            branches: [],
+          })
           .pipe(Effect.flip),
         tasks
           .cleanup({
             id: task.id,
-            worktreePaths: [],
+            worktrees: [{ path: archivedPath, acceptedDirtyFileCount: 0 }],
+            branches: [],
+          })
+          .pipe(Effect.flip),
+        tasks
+          .cleanup({
+            id: task.id,
+            worktrees: [],
             branches: [{ projectId: p1, branch: "task/b", force: true }],
           })
           .pipe(Effect.flip),
-        tasks.cleanup({ id: task.id, worktreePaths: [repo], branches: [] }).pipe(Effect.flip),
+        tasks
+          .cleanup({
+            id: task.id,
+            worktrees: [{ path: repo, acceptedDirtyFileCount: 0 }],
+            branches: [],
+          })
+          .pipe(Effect.flip),
       ]);
       assert.deepStrictEqual(
         refusals.map((error) => error._tag),
@@ -330,7 +350,7 @@ it.live("cleanup refuses an unmerged branch without force and deletes it with fo
       const select = (force: boolean) =>
         tasks.cleanup({
           id: task.id,
-          worktreePaths: [worktreePath],
+          worktrees: [{ path: worktreePath, acceptedDirtyFileCount: 0 }],
           branches: [{ projectId: p1, branch: "task/a", force }],
         });
       const refused = yield* select(false).pipe(Effect.flip);
@@ -360,7 +380,7 @@ it.live("cleanup of a selected branch keeps its dirty worktree that was not sele
       const refused = yield* tasks
         .cleanup({
           id: task.id,
-          worktreePaths: [],
+          worktrees: [],
           branches: [{ projectId: p1, branch: "task/a", force: false }],
         })
         .pipe(Effect.flip);
@@ -398,7 +418,10 @@ it.live("an extra branch is measured against its own base and survives the task 
       // The shared branch is selected first, yet the extra one still counts as merged.
       const result = yield* tasks.cleanup({
         id: task.id,
-        worktreePaths: [sharedPath, extraPath],
+        worktrees: [
+          { path: sharedPath, acceptedDirtyFileCount: 0 },
+          { path: extraPath, acceptedDirtyFileCount: 0 },
+        ],
         branches: [
           { projectId: p1, branch: "task/a", force: true },
           { projectId: p1, branch: "task/a-2", force: false },
@@ -422,7 +445,14 @@ it.live("cleanup records what it removed even when another removal fails", () =>
       const store = yield* TaskStore.TaskStore;
       const task = yield* seedTask([worktree("task/a", freePath), worktree("task/b", lockedPath)]);
       const failed = yield* tasks
-        .cleanup({ id: task.id, worktreePaths: [freePath, lockedPath], branches: [] })
+        .cleanup({
+          id: task.id,
+          worktrees: [
+            { path: freePath, acceptedDirtyFileCount: 0 },
+            { path: lockedPath, acceptedDirtyFileCount: 0 },
+          ],
+          branches: [],
+        })
         .pipe(Effect.flip);
       assert.strictEqual(failed._tag, "TaskError");
       const saved = yield* store.get(task.id);
@@ -448,11 +478,63 @@ it.live("cleanup removes a live worktree recorded through a symlink", () =>
       const task = yield* seedTask([worktree("task/a", aliasPath)]);
       const result = yield* tasks.cleanup({
         id: task.id,
-        worktreePaths: [aliasPath],
+        worktrees: [{ path: aliasPath, acceptedDirtyFileCount: 0 }],
         branches: [],
       });
       assert.strictEqual(result.removedWorktrees, 1);
       assert.isFalse(yield* fileSystem.exists(worktreePath));
     }).pipe(Effect.provide(tasksLayer(repo, [])));
+  }).pipe(Effect.scoped, Effect.provide(driverLayer)),
+);
+
+it.live("cleanup keeps a worktree that changed after the preview or has a running agent", () =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const repo = yield* makeRepo();
+    const changedPath = yield* addWorktree(repo, "task/a");
+    const runningPath = yield* addWorktree(repo, "task/b");
+    yield* Effect.gen(function* () {
+      const tasks = yield* TaskService.TaskService;
+      const task = yield* seedTask(
+        [worktree("task/a", changedPath), worktree("task/b", runningPath)],
+        ["th-running"],
+      );
+      const preview = yield* tasks.cleanupPreview({ id: task.id });
+      assert.deepStrictEqual(
+        preview.worktrees.map((entry) => entry.dirtyFileCount),
+        [0, 0],
+      );
+      // The agent writes a file after the user saw the worktree as clean.
+      yield* fileSystem.writeFileString(path.join(changedPath, "late.txt"), "late\n");
+      const changed = yield* tasks
+        .cleanup({
+          id: task.id,
+          worktrees: [{ path: changedPath, acceptedDirtyFileCount: 0 }],
+          branches: [],
+        })
+        .pipe(Effect.flip);
+      assert.include(changed.message, "изменени");
+      assert.isTrue(yield* fileSystem.exists(path.join(changedPath, "late.txt")));
+      // Once the user has seen and accepted the change, the worktree goes with it.
+      const accepted = yield* tasks.cleanup({
+        id: task.id,
+        worktrees: [{ path: changedPath, acceptedDirtyFileCount: 1 }],
+        branches: [],
+      });
+      assert.strictEqual(accepted.removedWorktrees, 1);
+      assert.isFalse(yield* fileSystem.exists(changedPath));
+      const running = yield* tasks
+        .cleanup({
+          id: task.id,
+          worktrees: [{ path: runningPath, acceptedDirtyFileCount: 0 }],
+          branches: [],
+        })
+        .pipe(Effect.flip);
+      assert.include(running.message, "агент");
+      assert.isTrue(yield* fileSystem.exists(runningPath));
+    }).pipe(
+      Effect.provide(tasksLayer(repo, [shell("th-running", runningPath, "task/b", null, "run-1")])),
+    );
   }).pipe(Effect.scoped, Effect.provide(driverLayer)),
 );

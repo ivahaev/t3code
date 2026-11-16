@@ -83,15 +83,21 @@ export function toggleWorktree(
   return { worktrees, branches };
 }
 
-/** The checked items as a cleanup request; unmerged branches are deleted with force. */
+/**
+ * The checked items as a cleanup request. Each worktree carries the uncommitted files the user
+ * saw, so the server keeps one that changed since; unmerged branches are deleted with force.
+ */
 export function cleanupSelectionInput(
   preview: TaskCleanupPreview,
   selection: CleanupSelection,
 ): CleanupSelectionInput {
   return {
-    worktreePaths: preview.worktrees
+    worktrees: preview.worktrees
       .filter((worktree) => selection.worktrees.has(worktree.path))
-      .map((worktree) => worktree.path),
+      .map((worktree) => ({
+        path: worktree.path,
+        acceptedDirtyFileCount: worktree.dirtyFileCount,
+      })),
     branches: preview.branches
       .filter((branch) => selection.branches.has(branchKey(branch)))
       .map((branch) => ({

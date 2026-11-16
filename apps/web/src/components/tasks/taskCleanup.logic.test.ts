@@ -103,13 +103,15 @@ describe("toggleWorktree", () => {
 });
 
 describe("cleanupSelectionInput", () => {
-  it("forces only the unmerged branches", () => {
+  it("accepts only the changes each worktree showed and forces only unmerged branches", () => {
     let selection = initialCleanupSelection(preview);
     selection = toggleBranch(selection, preview, cleanupBranchKey(backend, "card-pay-retry"));
+    selection = toggleWorktree(selection, preview, "/work/project-frontend/task/card-pay");
     expect(cleanupSelectionInput(preview, selection)).toEqual({
-      worktreePaths: [
-        "/work/project-backend/task/card-pay",
-        "/work/project-backend/card-pay-retry",
+      worktrees: [
+        { path: "/work/project-backend/task/card-pay", acceptedDirtyFileCount: 0 },
+        { path: "/work/project-backend/card-pay-retry", acceptedDirtyFileCount: 0 },
+        { path: "/work/project-frontend/task/card-pay", acceptedDirtyFileCount: 3 },
       ],
       branches: [
         { projectId: backend, branch: "task/card-pay", force: false },
@@ -125,16 +127,19 @@ describe("autoCleanupPlan", () => {
       worktrees: [wt(backend, "task/a"), wt(backend, "b", 2)],
       branches: [],
     });
-    expect(plan.silent).toEqual({ worktreePaths: ["/work/project-backend/task/a"], branches: [] });
+    expect(plan.silent).toEqual({
+      worktrees: [{ path: "/work/project-backend/task/a", acceptedDirtyFileCount: 0 }],
+      branches: [],
+    });
     expect(plan.needsDialog).toEqual({ worktrees: [wt(backend, "b", 2)], branches: [] });
   });
 
   it("asks about unmerged branches and merged ones held by a dirty worktree", () => {
     const plan = autoCleanupPlan(preview);
     expect(plan.silent).toEqual({
-      worktreePaths: [
-        "/work/project-backend/task/card-pay",
-        "/work/project-backend/card-pay-retry",
+      worktrees: [
+        { path: "/work/project-backend/task/card-pay", acceptedDirtyFileCount: 0 },
+        { path: "/work/project-backend/card-pay-retry", acceptedDirtyFileCount: 0 },
       ],
       branches: [{ projectId: backend, branch: "task/card-pay", force: false }],
     });

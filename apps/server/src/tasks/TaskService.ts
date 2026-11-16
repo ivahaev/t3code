@@ -989,6 +989,20 @@ const make = Effect.gen(function* () {
     const foreignBranches = new Set(
       foreign.flatMap((shell) => (shell.branch === null ? [] : [shell.branch])),
     );
+    const runningPaths = new Set(
+      yield* Effect.forEach(
+        snapshot.threads.flatMap((shell) =>
+          shell.projectId === projectId &&
+          shell.deletedAt === null &&
+          taskThreads.has(shell.id) &&
+          shell.activeRunId !== null &&
+          shell.worktreePath !== null
+            ? [shell.worktreePath]
+            : [],
+        ),
+        canonicalPath,
+      ),
+    );
     const mainCheckout = yield* canonicalPath(cwd);
     const paths = new Map<string, CleanupPath>();
     for (const worktree of task.worktrees) {
@@ -1005,6 +1019,7 @@ const make = Effect.gen(function* () {
         state,
         foreign: foreignPaths.has(canonical),
         mainCheckout: canonical === mainCheckout,
+        running: runningPaths.has(canonical),
       });
     }
     const defaultBranch = yield* git
@@ -1148,7 +1163,7 @@ const make = Effect.gen(function* () {
   const cleanup = Effect.fn("TaskService.cleanup")(function* (input: TaskCleanupInput) {
     yield* Effect.annotateCurrentSpan({ "task.id": input.id });
     const task = yield* resolveForCleanup(input.id);
-    if (input.worktreePaths.length === 0 && input.branches.length === 0) {
+    if (input.worktrees.length === 0 && input.branches.length === 0) {
       return { task, removedWorktrees: 0, deletedBranches: 0 } satisfies TaskCleanupResult;
     }
     const inspected = yield* inspectCleanupProjects(task);
@@ -1162,8 +1177,17 @@ const make = Effect.gen(function* () {
       /** Only a worktree the user selected may lose uncommitted changes. */
       readonly force: boolean;
     }
+    const refuseRunning = (project: CleanupProject, path: string) =>
+      project.paths.get(path)?.running === true
+        ? refuse(
+            `${path} остаётся: в нём сейчас работает агент задачи. Остановите его и повторите.`,
+          )
+        : Effect.void;
     const removals: Array<Removal> = [];
-    for (const path of new Set(input.worktreePaths)) {
+    const selectedWorktrees = new Map(
+      input.worktrees.map((selected) => [selected.path, selected.acceptedDirtyFileCount]),
+    );
+    for (const [path, acceptedDirtyFileCount] of selectedWorktrees) {
       const worktree = task.worktrees.find(
         (candidate) => candidate.worktreePath === path && candidate.removedAt === null,
       );
@@ -1173,12 +1197,20 @@ const make = Effect.gen(function* () {
       }
       const blocker = worktreeBlocker(worktree, project);
       if (blocker !== null) return yield* refuse(`${path} stays: ${blocker}.`);
+      yield* refuseRunning(project, path);
+      // Changes the user did not see in the preview are never discarded.
+      const dirty = yield* dirtyFileCount(task.id, project, path);
+      if (dirty > acceptedDirtyFileCount) {
+        return yield* refuse(
+          `${path} остаётся: после проверки в нём появились новые изменения (незакоммиченных файлов: ${dirty}). Откройте уборку заново.`,
+        );
+      }
       removals.push({
         projectId: worktree.projectId,
         project,
         path,
         branch: worktree.branch,
-        force: true,
+        force: dirty > 0,
       });
     }
 
@@ -1228,6 +1260,7 @@ const make = Effect.gen(function* () {
         const path =
           worktree.branch === selected.branch ? removableWorktreePath(worktree, project) : null;
         if (path === null || removals.some((removal) => removal.path === path)) continue;
+        yield* refuseRunning(project, path);
         const dirty = yield* dirtyFileCount(task.id, project, path);
         if (dirty > 0) {
           return yield* refuse(
