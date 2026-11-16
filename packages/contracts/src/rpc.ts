@@ -385,6 +385,26 @@ import {
   ScheduledTaskUpsertInput,
   ScheduledTaskMutationResult,
 } from "./scheduledTask.ts";
+import {
+  TaskAddProjectInput,
+  TaskAttachThreadInput,
+  TaskCleanupInput,
+  TaskCleanupPreview,
+  TaskCleanupPreviewInput,
+  TaskCleanupResult,
+  TaskDetachThreadInput,
+  TaskError,
+  TaskIdInput,
+  TaskListInput,
+  TaskListResult,
+  TaskMutationResult,
+  TaskNewThreadInput,
+  TaskSetCleanupModeInput,
+  TaskSetStatusInput,
+  TaskStartInput,
+  TaskThreadResult,
+  TaskUpsertInput,
+} from "./task.ts";
 import { SecretRequestAnswerInput, SecretRequestError } from "./secretRequest.ts";
 import {
   ProjectCloneActionInput,
@@ -551,6 +571,21 @@ export const WS_METHODS = {
   serverReportClientActivity: "server.reportClientActivity",
   serverGetUsageSummary: "server.getUsageSummary",
   serverRefreshUsageRates: "server.refreshUsageRates",
+
+  tasksSubscribe: "tasks.subscribe",
+  tasksUpsert: "tasks.upsert",
+  tasksSetStatus: "tasks.setStatus",
+  tasksDelete: "tasks.delete",
+  tasksArchive: "tasks.archive",
+  tasksUnarchive: "tasks.unarchive",
+  tasksStart: "tasks.start",
+  tasksNewThread: "tasks.newThread",
+  tasksAttachThread: "tasks.attachThread",
+  tasksDetachThread: "tasks.detachThread",
+  tasksAddProject: "tasks.addProject",
+  tasksCleanupPreview: "tasks.cleanupPreview",
+  tasksCleanup: "tasks.cleanup",
+  tasksSetCleanupMode: "tasks.setCleanupMode",
 
   scheduledTasksSubscribe: "scheduledTasks.subscribe",
   scheduledTasksUpsert: "scheduledTasks.upsert",
@@ -2022,6 +2057,91 @@ const WsSubscribeServerLifecycleRpc = Rpc.make(WS_METHODS.subscribeServerLifecyc
   stream: true,
 });
 
+const WsTasksSubscribeRpc = Rpc.make(WS_METHODS.tasksSubscribe, {
+  payload: TaskListInput,
+  success: TaskListResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
+const WsTasksUpsertRpc = Rpc.make(WS_METHODS.tasksUpsert, {
+  payload: TaskUpsertInput,
+  success: TaskMutationResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksSetStatusRpc = Rpc.make(WS_METHODS.tasksSetStatus, {
+  payload: TaskSetStatusInput,
+  success: TaskMutationResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksDeleteRpc = Rpc.make(WS_METHODS.tasksDelete, {
+  payload: TaskIdInput,
+  success: TaskMutationResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksArchiveRpc = Rpc.make(WS_METHODS.tasksArchive, {
+  payload: TaskIdInput,
+  success: TaskMutationResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksUnarchiveRpc = Rpc.make(WS_METHODS.tasksUnarchive, {
+  payload: TaskIdInput,
+  success: TaskMutationResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksStartRpc = Rpc.make(WS_METHODS.tasksStart, {
+  payload: TaskStartInput,
+  success: TaskThreadResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksNewThreadRpc = Rpc.make(WS_METHODS.tasksNewThread, {
+  payload: TaskNewThreadInput,
+  success: TaskThreadResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksAttachThreadRpc = Rpc.make(WS_METHODS.tasksAttachThread, {
+  payload: TaskAttachThreadInput,
+  success: TaskMutationResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksDetachThreadRpc = Rpc.make(WS_METHODS.tasksDetachThread, {
+  payload: TaskDetachThreadInput,
+  success: TaskMutationResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksAddProjectRpc = Rpc.make(WS_METHODS.tasksAddProject, {
+  payload: TaskAddProjectInput,
+  success: TaskMutationResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksCleanupPreviewRpc = Rpc.make(WS_METHODS.tasksCleanupPreview, {
+  payload: TaskCleanupPreviewInput,
+  success: TaskCleanupPreview,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksCleanupRpc = Rpc.make(WS_METHODS.tasksCleanup, {
+  payload: TaskCleanupInput,
+  success: TaskCleanupResult,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
+const WsTasksSetCleanupModeRpc = Rpc.make(WS_METHODS.tasksSetCleanupMode, {
+  payload: TaskSetCleanupModeInput,
+  success: TaskSetCleanupModeInput,
+  error: Schema.Union([TaskError, EnvironmentAuthorizationError]),
+});
+
 const WsScheduledTasksSubscribeRpc = Rpc.make(WS_METHODS.scheduledTasksSubscribe, {
   payload: ScheduledTaskListInput,
   success: ScheduledTaskListResult,
@@ -2172,6 +2292,20 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetUsageSummaryRpc,
   WsServerRefreshUsageRatesRpc,
   WsServerSignalProcessRpc,
+  WsTasksSubscribeRpc,
+  WsTasksUpsertRpc,
+  WsTasksSetStatusRpc,
+  WsTasksDeleteRpc,
+  WsTasksArchiveRpc,
+  WsTasksUnarchiveRpc,
+  WsTasksStartRpc,
+  WsTasksNewThreadRpc,
+  WsTasksAttachThreadRpc,
+  WsTasksDetachThreadRpc,
+  WsTasksAddProjectRpc,
+  WsTasksCleanupPreviewRpc,
+  WsTasksCleanupRpc,
+  WsTasksSetCleanupModeRpc,
   WsScheduledTasksSubscribeRpc,
   WsScheduledTasksUpsertRpc,
   WsScheduledTasksSetEnabledRpc,
