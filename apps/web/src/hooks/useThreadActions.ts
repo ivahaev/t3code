@@ -528,7 +528,7 @@ export function useThreadActions() {
       orphanedWorktreePath = getOrphanedWorktreePathForThread(
         survivingThreads,
         threadRef.threadId,
-        tasks === null ? null : liveTaskWorktreePaths(tasks),
+        tasks === null ? null : liveTaskWorktreePaths(tasks, threads),
       );
     }
     // A shell that leaves idle subagent children out cannot prove nobody else uses the worktree,

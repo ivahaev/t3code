@@ -5,7 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { TaskStore, layer } from "./TaskStore.ts";
+import { TaskStore, layer, selectKeptWorktreePaths } from "./TaskStore.ts";
 
 const sqlLayer = NodeSqliteClient.layer({ filename: ":memory:" });
 const testLayer = Layer.provideMerge(layer, sqlLayer);
@@ -75,13 +75,48 @@ it.effect("a thread belongs to at most one task", () =>
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("findTaskByThread and removeThreadEverywhere", () =>
+it.effect("findTaskByThread", () =>
   Effect.gen(function* () {
     const store = yield* TaskStore;
     yield* store.insert(makeTask("t1", ["th1"]));
     assert.strictEqual(yield* store.findTaskByThread(ThreadId.make("th1")), TaskId.make("t1"));
-    yield* store.removeThreadEverywhere(ThreadId.make("th1"));
-    assert.strictEqual(yield* store.findTaskByThread(ThreadId.make("th1")), null);
+    assert.strictEqual(yield* store.findTaskByThread(ThreadId.make("th2")), null);
+  }).pipe(Effect.provide(testLayer)),
+);
+
+it.effect("kept worktree paths include a linked thread's worktree while its record waits", () =>
+  Effect.gen(function* () {
+    const store = yield* TaskStore;
+    const sql = yield* SqlClient.SqlClient;
+    yield* sql`
+      CREATE TABLE orchestration_v2_projection_threads (
+        thread_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, deleted_at TEXT, payload_json TEXT NOT NULL
+      )`;
+    const thread = (id: string, branch: string, worktreePath: string, deletedAt: string | null) =>
+      sql`INSERT INTO orchestration_v2_projection_threads VALUES (
+        ${id}, 'p1', ${deletedAt}, ${JSON.stringify({ branch, worktreePath })}
+      )`;
+    yield* store.insert({
+      ...makeTask("t1", ["th-pending", "th-deleted", "th-other"]),
+      worktrees: [
+        { ...worktree("p1", "task/a"), worktreePath: "/wt/recorded", branchDeletedAt: null },
+        { ...worktree("p1", "task/b"), worktreePath: null, branchDeletedAt: null },
+        { ...worktree("p1", "task/c"), worktreePath: null, branchDeletedAt: null },
+        {
+          ...worktree("p1", "task/gone"),
+          worktreePath: "/wt/gone",
+          removedAt: "2026-01-03T00:00:00.000Z",
+        },
+      ],
+    });
+    // The launch has made the worktree, but the task has not learned its path yet.
+    yield* thread("th-pending", "task/b", "/wt/pending", null);
+    // A deleted chat still linked, before its cleanup unlinks it.
+    yield* thread("th-deleted", "task/c", "/wt/deleted", "2026-01-04T00:00:00.000Z");
+    yield* thread("th-other", "feat/unrelated", "/wt/unrelated", null);
+    yield* thread("th-unlinked", "task/b", "/wt/foreign", null);
+    const paths = (yield* selectKeptWorktreePaths(sql)).map((row) => row.taskWorktreePath);
+    assert.deepStrictEqual(paths.toSorted(), ["/wt/deleted", "/wt/pending", "/wt/recorded"]);
   }).pipe(Effect.provide(testLayer)),
 );
 

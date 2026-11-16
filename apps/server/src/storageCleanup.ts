@@ -58,6 +58,7 @@ import * as TerminalManager from "./terminal/Manager.ts";
 import { isFilesystemRoot, managedWorktreesDirectories } from "./worktreesDirectory.ts";
 import * as GitVcsDriver from "./vcs/GitVcsDriver.ts";
 import { isNonRepositoryGitStderr } from "./vcs/GitVcsDriverCore.ts";
+import { selectKeptWorktreePaths } from "./tasks/TaskStore.ts";
 import { isLinkedWorktree, removeLinkedWorktree } from "./vcs/worktreeRemoval.ts";
 import { withWorkspaceLease } from "./workspace/workspaceLease.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -1119,10 +1120,7 @@ const make = Effect.gen(function* () {
     });
     // A task keeps its worktrees until its own cleanup on Done, even after its last chat goes.
     // A failed read is null, which keeps every worktree this run.
-    const taskWorktreeKeys = yield* sql<{ taskWorktreePath: string }>`
-      SELECT worktree_path AS "taskWorktreePath" FROM task_worktrees
-      WHERE removed_at IS NULL AND worktree_path IS NOT NULL
-    `.pipe(
+    const taskWorktreeKeys = yield* selectKeptWorktreePaths(sql).pipe(
       NodeSqliteClient.readOnly,
       Effect.flatMap((rows) => Effect.forEach(rows, (row) => canonical(row.taskWorktreePath))),
       Effect.map((keys) => new Set(keys)),

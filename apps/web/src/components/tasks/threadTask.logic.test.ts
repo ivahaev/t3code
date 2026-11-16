@@ -44,7 +44,28 @@ describe("liveTaskWorktreePaths", () => {
         taskWorktree({ worktreePath: null }),
       ],
     });
-    expect(liveTaskWorktreePaths([task])).toEqual(["/work/wt/card-pay"]);
+    expect(liveTaskWorktreePaths([task], [])).toEqual(["/work/wt/card-pay"]);
+  });
+
+  it("keeps a chat's worktree while its task waits for the path", () => {
+    const chat = ThreadId.make("thread-a");
+    const task = makeTask({ threadIds: [chat], worktrees: [taskWorktree({ worktreePath: null })] });
+    const thread = (id: ThreadId, branch: string) => ({
+      id,
+      projectId: backend,
+      branch,
+      worktreePath: `/work/wt/${id}`,
+    });
+    expect(
+      liveTaskWorktreePaths(
+        [task],
+        [
+          thread(chat, "task/card-pay"),
+          thread(ThreadId.make("thread-other"), "task/card-pay"),
+          { ...thread(chat, "feat/other"), id: ThreadId.make("thread-b") },
+        ],
+      ),
+    ).toEqual(["/work/wt/thread-a"]);
   });
 });
 

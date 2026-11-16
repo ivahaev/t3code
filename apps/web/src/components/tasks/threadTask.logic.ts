@@ -1,11 +1,30 @@
 import type { Task, ThreadId } from "@t3tools/contracts";
 
-/** Worktrees the tasks still keep; deleting a chat must not remove them as orphans. */
-export function liveTaskWorktreePaths(tasks: ReadonlyArray<Task>): ReadonlyArray<string> {
+import type { ThreadShell } from "../../types";
+
+type TaskThreadWorkspace = Pick<ThreadShell, "id" | "projectId" | "branch" | "worktreePath">;
+
+/**
+ * Worktrees the tasks still keep; deleting a chat must not remove them as orphans. A worktree
+ * whose path the task has not learned yet is known by the task's chats on its branch.
+ */
+export function liveTaskWorktreePaths(
+  tasks: ReadonlyArray<Task>,
+  threads: ReadonlyArray<TaskThreadWorkspace>,
+): ReadonlyArray<string> {
   return tasks.flatMap((task) =>
-    task.worktrees.flatMap((worktree) =>
-      worktree.removedAt === null && worktree.worktreePath !== null ? [worktree.worktreePath] : [],
-    ),
+    task.worktrees.flatMap((worktree) => {
+      if (worktree.removedAt !== null) return [];
+      if (worktree.worktreePath !== null) return [worktree.worktreePath];
+      return threads.flatMap((thread) =>
+        task.threadIds.includes(thread.id) &&
+        thread.projectId === worktree.projectId &&
+        thread.branch === worktree.branch &&
+        thread.worktreePath !== null
+          ? [thread.worktreePath]
+          : [],
+      );
+    }),
   );
 }
 

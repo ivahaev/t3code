@@ -3,6 +3,7 @@ import { assert, it } from "@effect/vitest";
 import {
   CommandId,
   type ModelSelection,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
   type Project,
@@ -12,10 +13,13 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
+import * as Queue from "effect/Queue";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -57,7 +61,14 @@ interface LaunchControl {
   /** Holds every launch until completed. */
   readonly gate?: Deferred.Deferred<void>;
   fail?: boolean;
+  /** Runs on every thread shell read. */
+  onShellRead?: Effect.Effect<void>;
 }
+
+/** Domain events the task service hears; tests offer the ones they need. */
+class TestEvents extends Context.Service<TestEvents, Queue.Queue<OrchestrationV2DomainEvent>>()(
+  "test/TaskService/TestEvents",
+) {}
 
 // Every test gets its own shells and launch recorder, so nothing leaks between tests.
 const makeTestLayer = (control: LaunchControl = {}) => {
@@ -66,13 +77,32 @@ const makeTestLayer = (control: LaunchControl = {}) => {
     ["th-x", shell("th-x", { projectId: p2, worktreePath: "/wt/x", branch: "feat/x" })],
     ["th-plain", shell("th-plain", { projectId: p1 })],
   ]);
+  // The thread projection removeThread reads; tests add the rows they need.
+  const projectionTable = Layer.effectDiscard(
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        CREATE TABLE orchestration_v2_projection_threads (
+          thread_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, deleted_at TEXT,
+          payload_json TEXT NOT NULL
+        )`;
+    }).pipe(Effect.orDie),
+  );
   const layer = TaskService.layer.pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         TaskStore.layer,
-        Layer.mock(ThreadManagementService.ThreadManagementService)({
-          getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
-        }),
+        projectionTable,
+        Layer.unwrap(
+          Effect.gen(function* () {
+            const events = yield* TestEvents;
+            return Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadShell: (threadId) =>
+                (control.onShellRead ?? Effect.void).pipe(Effect.as(shells.get(threadId) ?? null)),
+              streamDomainEvents: Stream.fromQueue(events),
+            });
+          }),
+        ),
         Layer.mock(ThreadLaunchService.ThreadLaunchService)({
           checkWorktreeBase: () => Effect.void,
           launch: (input) =>
@@ -110,7 +140,8 @@ const makeTestLayer = (control: LaunchControl = {}) => {
         }),
       ),
     ),
-    Layer.provide(NodeSqliteClient.layer({ filename: ":memory:" })),
+    Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
+    Layer.provideMerge(Layer.effect(TestEvents, Queue.unbounded<OrchestrationV2DomainEvent>())),
   );
   return { layer, launches, shells };
 };
@@ -679,5 +710,123 @@ it.effect("start after every thread was detached reuses the shared worktree", ()
     });
     assert.strictEqual(restarted.task.worktrees.length, 1);
     assert.deepStrictEqual(restarted.task.threadIds, [restarted.threadId]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("deleting the only chat before its worktree path is known keeps the worktree", () => {
+  const { layer, launches } = makeTestLayer();
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const sql = yield* SqlClient.SqlClient;
+    const task = yield* newTask("Deleted early");
+    const started = yield* tasks.start({
+      id: task.id,
+      commandId: CommandId.make("deleted-early"),
+      ...launchOptions,
+    });
+    // The chat is deleted, so only its projection row still names the worktree it made.
+    yield* sql`INSERT INTO orchestration_v2_projection_threads VALUES (
+      ${started.threadId}, ${p1}, '2026-11-16T00:00:00.000Z',
+      ${JSON.stringify({ branch: "task/deleted-early", worktreePath: "/wt/deleted-early" })}
+    )`;
+    yield* tasks.removeThread(started.threadId);
+    const [listed] = (yield* tasks.list()).tasks;
+    assert.deepStrictEqual(listed?.threadIds, []);
+    assert.strictEqual(listed?.worktrees[0]?.worktreePath, "/wt/deleted-early");
+    yield* tasks.newThread(sharedRequest(task.id, "after-delete"));
+    assert.deepStrictEqual(launches[1]?.workspaceStrategy, {
+      type: "existing_worktree",
+      worktreePath: "/wt/deleted-early",
+      branch: "task/deleted-early",
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("detaching a chat before its worktree path is known keeps the path", () => {
+  const { layer, shells } = makeTestLayer();
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const store = yield* TaskStore.TaskStore;
+    const task = yield* newTask("Detached early");
+    const started = yield* tasks.start({
+      id: task.id,
+      commandId: CommandId.make("detached-early"),
+      ...launchOptions,
+    });
+    shells.set(
+      started.threadId,
+      shell(started.threadId, {
+        projectId: p1,
+        worktreePath: "/wt/detached-early",
+        branch: "task/detached-early",
+      }),
+    );
+    yield* tasks.detachThread({ id: task.id, threadId: started.threadId });
+    const saved = yield* store.get(task.id);
+    assert.deepStrictEqual(saved?.threadIds, []);
+    assert.strictEqual(saved?.worktrees[0]?.worktreePath, "/wt/detached-early");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("a chat's worktree path is saved as soon as the chat reports it", () => {
+  const { layer } = makeTestLayer();
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const events = yield* TestEvents;
+    const task = yield* newTask("Reported");
+    const started = yield* tasks.start({
+      id: task.id,
+      commandId: CommandId.make("reported"),
+      ...launchOptions,
+    });
+    const reported = {
+      type: "thread.metadata-updated",
+      threadId: started.threadId,
+      payload: {
+        id: started.threadId,
+        projectId: p1,
+        branch: "task/reported",
+        worktreePath: "/wt/reported",
+        deletedAt: null,
+      },
+    } as unknown as OrchestrationV2DomainEvent;
+    const emitted = yield* tasks.subscribeList().pipe(
+      Stream.tap((result) =>
+        result.tasks[0]?.worktrees[0]?.worktreePath === null
+          ? Queue.offer(events, reported)
+          : Effect.void,
+      ),
+      Stream.take(2),
+      Stream.runCollect,
+    );
+    assert.deepStrictEqual(
+      Array.from(emitted).map((result) => result.tasks[0]?.worktrees[0]?.worktreePath),
+      [null, "/wt/reported"],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("list leaves out a task deleted while its worktree paths are read", () => {
+  const control: LaunchControl = {};
+  const { layer, shells } = makeTestLayer(control);
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const store = yield* TaskStore.TaskStore;
+    const task = yield* newTask("Deleted meanwhile");
+    const started = yield* tasks.start({
+      id: task.id,
+      commandId: CommandId.make("deleted-meanwhile"),
+      ...launchOptions,
+    });
+    shells.set(
+      started.threadId,
+      shell(started.threadId, {
+        projectId: p1,
+        worktreePath: "/wt/deleted-meanwhile",
+        branch: "task/deleted-meanwhile",
+      }),
+    );
+    control.onShellRead = store.delete(task.id);
+    assert.deepStrictEqual((yield* tasks.list()).tasks, []);
   }).pipe(Effect.provide(layer));
 });

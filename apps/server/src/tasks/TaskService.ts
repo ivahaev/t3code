@@ -45,6 +45,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import { forkParked } from "../serverActivation.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { formatTaskPrompt, taskBranchName } from "./taskBranch.ts";
 import {
@@ -111,19 +112,18 @@ export const resolveTaskProjects = (
 };
 
 /**
- * Fills a missing worktree path from the first live thread of the task on the same branch
- * in the same project. Launch creates the worktree after it returns, so the path comes late.
+ * Fills a missing worktree path from the first of the task's threads on the same branch in
+ * the same project. Launch creates the worktree after it returns, so the path comes late.
  */
 const fillWorktreePaths = (
   worktrees: ReadonlyArray<TaskWorktree>,
-  shells: ReadonlyArray<TaskShell>,
+  shells: ReadonlyArray<TaskStore.ThreadWorkspace>,
 ): ReadonlyArray<TaskWorktree> =>
   worktrees.map((worktree) => {
     if (worktree.worktreePath !== null || worktree.removedAt !== null) return worktree;
     const worktreePath =
       shells.find(
         (shell) =>
-          shell.deletedAt === null &&
           shell.worktreePath !== null &&
           shell.projectId === worktree.projectId &&
           shell.branch === worktree.branch,
@@ -221,25 +221,35 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * Fills missing worktree paths from the task's own threads and saves them once found.
+   * Fills missing worktree paths from the task's own live threads and saves them once found.
    * Launch creates the worktree after it returns, so the path comes late. Cleanup reuses it.
+   * Null when the task was deleted meanwhile.
    */
   const resolveWorktreePaths = Effect.fn("TaskService.resolveWorktreePaths")(function* (
     task: Task,
-    shells: ReadonlyArray<TaskShell>,
+    shells: ReadonlyArray<TaskStore.ThreadWorkspace & { readonly deletedAt: unknown }>,
   ) {
-    if (fillWorktreePaths(task.worktrees, shells).every((w, i) => w === task.worktrees[i])) {
+    const live = shells.filter((shell) => shell.deletedAt === null);
+    if (fillWorktreePaths(task.worktrees, live).every((w, i) => w === task.worktrees[i])) {
       return task;
     }
     return yield* serialized(
       Effect.gen(function* () {
-        const current = yield* requireTask(task.id);
-        const worktrees = fillWorktreePaths(current.worktrees, shells);
+        const current = yield* store.get(task.id);
+        if (current === null) return null;
+        const worktrees = fillWorktreePaths(current.worktrees, live);
         if (worktrees.every((w, i) => w === current.worktrees[i])) return current;
         return (yield* save({ ...current, worktrees })).task;
       }),
     );
   });
+
+  const resolveExistingWorktreePaths = Effect.fn("TaskService.resolveExistingWorktreePaths")(
+    function* (task: Task, shells: ReadonlyArray<TaskShell>) {
+      const resolved = yield* resolveWorktreePaths(task, shells);
+      return resolved ?? (yield* requireTask(task.id));
+    },
+  );
 
   // Only tasks with a worktree still waiting for its path read thread shells; normally none.
   const list = Effect.fn("TaskService.list")(function* () {
@@ -254,7 +264,7 @@ const make = Effect.gen(function* () {
       { concurrency: 4 },
     );
     return {
-      tasks,
+      tasks: tasks.filter((task) => task !== null),
       settings: { cleanupMode: yield* readCleanupMode },
     } satisfies TaskListResult;
   });
@@ -439,22 +449,72 @@ const make = Effect.gen(function* () {
     );
   });
 
+  /**
+   * Unlinks a thread, first taking the worktree path it made for a record still waiting for
+   * one: once unlinked, nothing else would tell the task where its worktree is.
+   */
+  const unlinkThread = Effect.fn("TaskService.unlinkThread")(function* (
+    task: Task,
+    threadId: ThreadId,
+    workspace: TaskStore.ThreadWorkspace | null,
+  ) {
+    return yield* save({
+      ...task,
+      worktrees:
+        workspace === null ? task.worktrees : fillWorktreePaths(task.worktrees, [workspace]),
+      threadIds: task.threadIds.filter((id) => id !== threadId),
+    });
+  });
+
+  // The thread is deleted already, so only its projection row still knows its worktree.
   const removeThread = Effect.fn("TaskService.removeThread")(function* (threadId: ThreadId) {
     const owner = yield* store.findTaskByThread(threadId);
-    if (owner === null) return;
-    yield* store.removeThreadEverywhere(threadId);
-    yield* notifyChanged;
+    const task = owner === null ? null : yield* store.get(owner);
+    if (task === null) return;
+    const workspace = hasPendingWorktree(task) ? yield* store.getThreadWorkspace(threadId) : null;
+    yield* unlinkThread(task, threadId, workspace);
   }, serialized);
 
   const detachThread = Effect.fn("TaskService.detachThread")(function* (
     input: TaskDetachThreadInput,
   ) {
-    const task = yield* requireTask(input.id);
-    return yield* save({
-      ...task,
-      threadIds: task.threadIds.filter((threadId) => threadId !== input.threadId),
-    });
-  }, serialized);
+    const shell = yield* threadManagement
+      .getThreadShell(input.threadId)
+      .pipe(Effect.orElseSucceed(() => null));
+    return yield* serialized(
+      Effect.gen(function* () {
+        const task = yield* requireTask(input.id);
+        return yield* unlinkThread(
+          task,
+          input.threadId,
+          shell === null || shell.deletedAt !== null ? null : shell,
+        );
+      }),
+    );
+  });
+
+  /** Saves a worktree path as soon as a task thread reports it, before anyone lists tasks. */
+  const trackWorktreePath = Effect.fn("TaskService.trackWorktreePath")(function* (
+    thread: TaskStore.ThreadWorkspace & {
+      readonly id: ThreadId;
+      readonly deletedAt: unknown;
+    },
+  ) {
+    if (thread.worktreePath === null || thread.branch === null) return;
+    const owner = yield* store.findTaskByThread(thread.id);
+    const task = owner === null ? null : yield* store.get(owner);
+    if (task === null || !hasPendingWorktree(task)) return;
+    yield* resolveWorktreePaths(task, [thread]);
+  });
+  yield* forkParked(
+    Stream.runForEach(threadManagement.streamDomainEvents, (event) =>
+      event.type === "thread.metadata-updated" ? trackWorktreePath(event.payload) : Effect.void,
+    ).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Task worktree path tracking stopped", { cause }),
+      ),
+    ),
+  );
 
   const addProject = Effect.fn("TaskService.addProject")(function* (input: TaskAddProjectInput) {
     const task = yield* requireTask(input.id);
@@ -593,7 +653,7 @@ const make = Effect.gen(function* () {
     const { projectId, commandId } = input;
     // Thread shells and git reads happen before the lock.
     const shells = yield* readPendingShells(input.task);
-    const task = yield* resolveWorktreePaths(input.task, shells);
+    const task = yield* resolveExistingWorktreePaths(input.task, shells);
     const known = task.worktrees.find(isLiveShared(projectId));
     const fresh =
       known === undefined
@@ -870,7 +930,7 @@ const make = Effect.gen(function* () {
   /** The task with worktree paths that its threads have reported since launch. */
   const resolveForCleanup = Effect.fn("TaskService.resolveForCleanup")(function* (id: TaskId) {
     const task = yield* requireTask(id);
-    return yield* resolveWorktreePaths(task, yield* readPendingShells(task));
+    return yield* resolveExistingWorktreePaths(task, yield* readPendingShells(task));
   });
 
   const runGit = <A>(

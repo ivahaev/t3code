@@ -23,11 +23,18 @@ export class TaskStore extends Context.Service<
     readonly update: (task: Task) => Effect.Effect<void>;
     readonly delete: (id: TaskId) => Effect.Effect<void>;
     readonly findTaskByThread: (threadId: ThreadId) => Effect.Effect<TaskId | null>;
-    readonly removeThreadEverywhere: (threadId: ThreadId) => Effect.Effect<void>;
+    /** The thread's workspace from its projection, also when the thread is deleted. */
+    readonly getThreadWorkspace: (threadId: ThreadId) => Effect.Effect<ThreadWorkspace | null>;
     readonly getSetting: (key: string) => Effect.Effect<string | null>;
     readonly setSetting: (key: string, value: string) => Effect.Effect<void>;
   }
 >()("t3/tasks/TaskStore") {}
+
+export interface ThreadWorkspace {
+  readonly projectId: ProjectId;
+  readonly branch: string | null;
+  readonly worktreePath: string | null;
+}
 
 interface TaskRow {
   readonly id: string;
@@ -43,6 +50,25 @@ interface TaskRow {
   readonly completed_at: string | null;
   readonly archived_at: string | null;
 }
+
+/**
+ * Worktree paths that tasks keep, so storage cleanup leaves them. A record still waiting for
+ * its path keeps the worktree of each linked thread on its branch, deleted threads included.
+ */
+export const selectKeptWorktreePaths = (sql: SqlClient.SqlClient) =>
+  sql<{ taskWorktreePath: string }>`
+    SELECT worktree_path AS "taskWorktreePath" FROM task_worktrees
+    WHERE removed_at IS NULL AND worktree_path IS NOT NULL
+    UNION
+    SELECT json_extract(t.payload_json, '$.worktreePath') AS "taskWorktreePath"
+    FROM task_worktrees w
+    JOIN task_threads l ON l.task_id = w.task_id
+    JOIN orchestration_v2_projection_threads t
+      ON t.thread_id = l.thread_id AND t.project_id = w.project_id
+    WHERE w.removed_at IS NULL AND w.worktree_path IS NULL
+      AND json_extract(t.payload_json, '$.branch') = w.branch
+      AND json_extract(t.payload_json, '$.worktreePath') IS NOT NULL
+  `;
 
 const makeTaskStore = Effect.fn("TaskStore.make")(function* () {
   {
@@ -232,10 +258,26 @@ const makeTaskStore = Effect.fn("TaskStore.make")(function* () {
       return (rows[0]?.task_id as TaskId | undefined) ?? null;
     });
 
-    const removeThreadEverywhere = Effect.fn("TaskStore.removeThreadEverywhere")(function* (
+    const getThreadWorkspace = Effect.fn("TaskStore.getThreadWorkspace")(function* (
       threadId: ThreadId,
     ) {
-      yield* sql`DELETE FROM task_threads WHERE thread_id = ${threadId}`;
+      const rows = yield* sql<{
+        project_id: string;
+        branch: string | null;
+        worktree_path: string | null;
+      }>`
+        SELECT project_id,
+          json_extract(payload_json, '$.branch') AS branch,
+          json_extract(payload_json, '$.worktreePath') AS worktree_path
+        FROM orchestration_v2_projection_threads WHERE thread_id = ${threadId}`;
+      const row = rows[0];
+      return row === undefined
+        ? null
+        : ({
+            projectId: row.project_id as ProjectId,
+            branch: row.branch,
+            worktreePath: row.worktree_path,
+          } satisfies ThreadWorkspace);
     });
 
     const getSetting = Effect.fn("TaskStore.getSetting")(function* (key: string) {
@@ -264,7 +306,7 @@ const makeTaskStore = Effect.fn("TaskStore.make")(function* () {
       update: orDie(update),
       delete: orDie(remove),
       findTaskByThread: orDie(findTaskByThread),
-      removeThreadEverywhere: orDie(removeThreadEverywhere),
+      getThreadWorkspace: orDie(getThreadWorkspace),
       getSetting: orDie(getSetting),
       setSetting: orDie(setSetting),
     });
