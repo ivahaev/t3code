@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
@@ -102,6 +103,7 @@ const makeTestLayer = (control: LaunchControl = {}) => {
             Effect.succeedSome({ id: projectId, workspaceRoot: `/repo/${projectId}` } as Project),
         }),
         Layer.mock(GitVcsDriver.GitVcsDriver)({}),
+        NodeServices.layer,
         Layer.mock(GitWorkflowService.GitWorkflowService)({
           resolveDefaultBranchName: () => Effect.succeed("main"),
           listLocalBranchNames: () => Effect.succeed(["main"]),

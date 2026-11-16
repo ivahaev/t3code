@@ -31,6 +31,7 @@ import { randomUuidV4 } from "@t3tools/provider-core/server/randomUuid";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
@@ -47,15 +48,18 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { formatTaskPrompt, taskBranchName } from "./taskBranch.ts";
 import {
-  type BranchMergeState,
   branchMergeState,
+  type CleanupPath,
   type CleanupProject,
+  currentBranch,
   isDeletableBranch,
   isPendingWorktree,
   mergeBaseCandidates,
-  refExists,
   removableWorktreePath,
-  resolveBaseRef,
+  resolveBaseCommit,
+  resolveCommit,
+  worktreeBlocker,
+  type WorktreePathState,
 } from "./taskCleanup.ts";
 import * as TaskStore from "./TaskStore.ts";
 
@@ -178,6 +182,7 @@ const make = Effect.gen(function* () {
   const git = yield* GitWorkflowService.GitWorkflowService;
   const launches = yield* ThreadLaunchService.ThreadLaunchService;
   const vcs = yield* GitVcsDriver.GitVcsDriver;
+  const fileSystem = yield* FileSystem.FileSystem;
   // Notifications re-emit the full list; slow subscribers need only the newest dirty signal.
   const changes = yield* PubSub.sliding<void>(1);
   // Mutations read, modify and rewrite a whole task, so they run one at a time.
@@ -878,6 +883,10 @@ const make = Effect.gen(function* () {
       Effect.mapError((cause) => new TaskError({ message, taskId, cause })),
     );
 
+  /** The real path, so another spelling of the same folder matches; the path itself if missing. */
+  const canonicalPath = (path: string) =>
+    fileSystem.realPath(path).pipe(Effect.orElseSucceed(() => path));
+
   /**
    * Reads what cleanup needs about one project, or null when the project is gone. Any failure
    * to learn which worktrees other threads use fails cleanup, so nothing in use is offered.
@@ -889,41 +898,72 @@ const make = Effect.gen(function* () {
     const project = yield* projects.getById(projectId).pipe(Effect.orElseSucceed(Option.none));
     if (Option.isNone(project)) return null;
     const cwd = project.value.workspaceRoot;
-    const failed = (message: string) => (cause: unknown) =>
-      new TaskError({ message, taskId: task.id, cause });
-    const livePaths = yield* runGit(
+    const listed = yield* runGit(
       task.id,
       "Could not list the project's worktrees.",
       vcs.listWorktreePaths(cwd),
     );
-    const entries = yield* threadManagement
-      .listProjectThreads({ projectId, includeSubagents: true })
-      .pipe(Effect.mapError(failed("Could not list the project's threads.")));
-    const taskThreads = new Set<string>(task.threadIds);
-    const foreign = yield* Effect.forEach(
-      entries.filter((entry) => !taskThreads.has(entry.id)),
-      (entry) =>
-        threadManagement
-          .getThreadShell(entry.id)
-          .pipe(Effect.mapError(failed("Could not read a project thread."))),
-      { concurrency: 8 },
+    const livePaths = new Set(yield* Effect.forEach(listed, canonicalPath));
+    // Archived threads count too: unarchiving one brings its worktree back into use.
+    const snapshot = yield* threadManagement.getShellSnapshot({ projectId }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new TaskError({
+            message: "Could not read the project's threads.",
+            taskId: task.id,
+            cause,
+          }),
+      ),
     );
-    const foreignPaths = new Set<string>();
-    const foreignBranches = new Set<string>();
-    for (const shell of foreign) {
-      if (shell === null || shell.deletedAt !== null) continue;
-      if (shell.worktreePath !== null) foreignPaths.add(shell.worktreePath);
-      if (shell.branch !== null) foreignBranches.add(shell.branch);
+    const taskThreads = new Set<string>(task.threadIds);
+    const foreign = [...snapshot.threads, ...snapshot.archivedThreads].filter(
+      (shell) =>
+        shell.projectId === projectId && shell.deletedAt === null && !taskThreads.has(shell.id),
+    );
+    const foreignPaths = new Set(
+      yield* Effect.forEach(
+        foreign.flatMap((shell) => (shell.worktreePath === null ? [] : [shell.worktreePath])),
+        canonicalPath,
+      ),
+    );
+    const foreignBranches = new Set(
+      foreign.flatMap((shell) => (shell.branch === null ? [] : [shell.branch])),
+    );
+    const mainCheckout = yield* canonicalPath(cwd);
+    const paths = new Map<string, CleanupPath>();
+    for (const worktree of task.worktrees) {
+      const path = worktree.worktreePath;
+      if (worktree.projectId !== projectId || path === null || paths.has(path)) continue;
+      const canonical = yield* canonicalPath(path);
+      // A failed check counts as present, so the folder is never assumed gone.
+      const state: WorktreePathState = livePaths.has(canonical)
+        ? "live"
+        : (yield* fileSystem.exists(path).pipe(Effect.orElseSucceed(() => true)))
+          ? "stray"
+          : "gone";
+      paths.set(path, {
+        state,
+        foreign: foreignPaths.has(canonical),
+        mainCheckout: canonical === mainCheckout,
+      });
     }
-    const defaultBranch =
-      (yield* git.resolveDefaultBranchName(cwd, "origin").pipe(Effect.orElseSucceed(() => null))) ??
-      "main";
+    const defaultBranch = yield* git
+      .resolveDefaultBranchName(cwd, "origin")
+      .pipe(Effect.orElseSucceed(() => null));
+    const checkedOut = yield* runGit(
+      task.id,
+      "Could not read the project's current branch.",
+      currentBranch(cwd),
+    );
+    const protectedBranches = new Set(["main", "master"]);
+    if (defaultBranch !== null) protectedBranches.add(defaultBranch);
+    if (checkedOut !== null) protectedBranches.add(checkedOut);
     return {
       cwd,
-      livePaths: new Set(livePaths),
-      foreignPaths,
+      paths,
       foreignBranches,
-      defaultBranch,
+      protectedBranches,
+      baseBranches: defaultBranch === null ? ["main", "master"] : [defaultBranch],
     } satisfies CleanupProject;
   });
 
@@ -946,6 +986,7 @@ const make = Effect.gen(function* () {
     );
   });
 
+  /** The branch's merge state against its base, with the base commit pinned for a later check. */
   const mergeState = Effect.fn("TaskService.mergeState")(function* (
     taskId: TaskId,
     project: CleanupProject,
@@ -955,11 +996,20 @@ const make = Effect.gen(function* () {
       taskId,
       `Could not check whether ${worktree.branch} is merged.`,
       Effect.gen(function* () {
-        const base = yield* resolveBaseRef(project.cwd, mergeBaseCandidates(worktree, project));
-        if (base !== null) return yield* branchMergeState(project.cwd, worktree.branch, base);
+        const baseCommit = yield* resolveBaseCommit(
+          project.cwd,
+          mergeBaseCandidates(worktree, project),
+        );
+        if (baseCommit !== null) {
+          return {
+            ...(yield* branchMergeState(project.cwd, worktree.branch, baseCommit)),
+            baseCommit,
+          };
+        }
         // With no base to compare, the branch never counts as merged.
-        const exists = yield* refExists(project.cwd, `refs/heads/${worktree.branch}`);
-        return { exists, merged: !exists, unmergedCommitCount: 0 } satisfies BranchMergeState;
+        const exists =
+          (yield* resolveCommit(project.cwd, `refs/heads/${worktree.branch}`)) !== null;
+        return { exists, merged: !exists, unmergedCommitCount: 0, baseCommit };
       }),
     );
   });
@@ -970,7 +1020,7 @@ const make = Effect.gen(function* () {
     worktreePath: string,
   ) {
     // Git no longer lists it, so there is nothing to read and cleanup only marks it.
-    if (!project.livePaths.has(worktreePath)) return 0;
+    if (project.paths.get(worktreePath)?.state !== "live") return 0;
     const status = yield* runGit(
       taskId,
       "Could not read the worktree's changes.",
@@ -1061,9 +1111,8 @@ const make = Effect.gen(function* () {
       if (worktree === undefined || project === undefined) {
         return yield* refuse(`${path} is not a worktree of this task.`);
       }
-      if (removableWorktreePath(worktree, project) === null) {
-        return yield* refuse(`${path} is in use outside this task, so it stays.`);
-      }
+      const blocker = worktreeBlocker(worktree, project);
+      if (blocker !== null) return yield* refuse(`${path} stays: ${blocker}.`);
       removals.push({
         projectId: worktree.projectId,
         project,
@@ -1080,6 +1129,7 @@ const make = Effect.gen(function* () {
       readonly record: TaskWorktree;
       readonly force: boolean;
       readonly exists: boolean;
+      readonly baseCommit: string | null;
     }
     const deletions: Array<Deletion> = [];
     const selectedBranches = new Map(
@@ -1107,14 +1157,23 @@ const make = Effect.gen(function* () {
       const state = yield* mergeState(task.id, project, record);
       if (state.exists && !state.merged && !selected.force) {
         return yield* refuse(
-          `${selected.branch} has ${state.unmergedCommitCount} unmerged commits; confirm to delete it anyway.`,
+          state.baseCommit === null
+            ? `The base branch of ${selected.branch} could not be determined; confirm to delete it anyway.`
+            : `${selected.branch} has ${state.unmergedCommitCount} unmerged commits; confirm to delete it anyway.`,
         );
       }
-      // Git cannot delete a branch while a worktree has it checked out, so that worktree goes too.
+      // Git cannot delete a branch while a worktree has it checked out, so that worktree goes too,
+      // but only when it is clean: uncommitted changes go only if the user selected the worktree.
       for (const worktree of records) {
         const path =
           worktree.branch === selected.branch ? removableWorktreePath(worktree, project) : null;
         if (path === null || removals.some((removal) => removal.path === path)) continue;
+        const dirty = yield* dirtyFileCount(task.id, project, path);
+        if (dirty > 0) {
+          return yield* refuse(
+            `${selected.branch} stays: ${path} has ${dirty} uncommitted files; select that worktree to remove it.`,
+          );
+        }
         removals.push({
           projectId: selected.projectId,
           project,
@@ -1130,16 +1189,22 @@ const make = Effect.gen(function* () {
         record,
         force: selected.force,
         exists: state.exists,
+        baseCommit: state.baseCommit,
       });
     }
 
     const failures: Array<string> = [];
     const removedPaths = new Set<string>();
     for (const removal of removals) {
-      // A path Git no longer lists is not touched: another checkout may sit there now.
-      const effect = removal.project.livePaths.has(removal.path)
-        ? vcs.removeWorktree({ cwd: removal.project.cwd, path: removal.path, force: removal.force })
-        : vcs.pruneWorktrees({ cwd: removal.project.cwd });
+      // A path that is gone from disk only leaves Git metadata to prune.
+      const effect =
+        removal.project.paths.get(removal.path)?.state === "live"
+          ? vcs.removeWorktree({
+              cwd: removal.project.cwd,
+              path: removal.path,
+              force: removal.force,
+            })
+          : vcs.pruneWorktrees({ cwd: removal.project.cwd });
       const result = yield* Effect.result(
         runGit(task.id, `Could not remove ${removal.path}.`, effect),
       );
@@ -1148,7 +1213,11 @@ const make = Effect.gen(function* () {
     }
 
     const deletedBranches = new Set<string>();
-    for (const deletion of deletions) {
+    // Extra branches first: they are measured against the task branch.
+    const ordered = deletions.toSorted(
+      (a, b) => Number(a.record.kind === "shared") - Number(b.record.kind === "shared"),
+    );
+    for (const deletion of ordered) {
       const key = `${deletion.projectId}\u0000${deletion.branch}`;
       const blocked = removals.some(
         (removal) =>
@@ -1166,10 +1235,18 @@ const make = Effect.gen(function* () {
       }
       const deleted = yield* Effect.result(
         Effect.gen(function* () {
-          // Its worktree is gone now, so nothing adds commits after this check.
-          const state = yield* mergeState(task.id, deletion.project, deletion.record);
-          if (!state.exists) return;
-          if (!state.merged && !deletion.force) {
+          // Its worktree is gone now, so nothing adds commits after this check. The base is
+          // the commit pinned before, so deleting the task branch does not move it.
+          const state =
+            deletion.baseCommit === null
+              ? null
+              : yield* runGit(
+                  task.id,
+                  `Could not check whether ${deletion.branch} is merged.`,
+                  branchMergeState(deletion.project.cwd, deletion.branch, deletion.baseCommit),
+                );
+          if (state !== null && !state.exists) return;
+          if ((state === null || !state.merged) && !deletion.force) {
             return yield* refuse(`${deletion.branch} gained unmerged commits, so it stays.`);
           }
           // "Merged" was checked against the task's base; `git branch -d` would check HEAD.

@@ -11,8 +11,11 @@ export interface BranchMergeState {
 
 const OPERATION = "TaskCleanup.git";
 
-/** True when `ref` names a commit in the repository at `cwd`. */
-export const refExists = Effect.fn("TaskCleanup.refExists")(function* (cwd: string, ref: string) {
+/** The commit `ref` names in the repository at `cwd`, or null. */
+export const resolveCommit = Effect.fn("TaskCleanup.resolveCommit")(function* (
+  cwd: string,
+  ref: string,
+) {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const result = yield* git.execute({
     operation: OPERATION,
@@ -20,18 +23,36 @@ export const refExists = Effect.fn("TaskCleanup.refExists")(function* (cwd: stri
     args: ["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`],
     allowNonZeroExit: true,
   });
-  return result.exitCode === 0;
+  const commit = result.stdout.trim();
+  return result.exitCode === 0 && commit.length > 0 ? commit : null;
 });
 
-/** The first of `candidates` that exists, or null. */
-export const resolveBaseRef = Effect.fn("TaskCleanup.resolveBaseRef")(function* (
+/**
+ * The commit of the first of `candidates` that exists, or null. Pinning the commit keeps a later
+ * check on the same base even after cleanup deletes the branch it was named by.
+ */
+export const resolveBaseCommit = Effect.fn("TaskCleanup.resolveBaseCommit")(function* (
   cwd: string,
   candidates: ReadonlyArray<string>,
 ) {
   for (const candidate of new Set(candidates)) {
-    if (yield* refExists(cwd, candidate)) return candidate;
+    const commit = yield* resolveCommit(cwd, candidate);
+    if (commit !== null) return commit;
   }
   return null;
+});
+
+/** The branch the main checkout has checked out, or null when HEAD is detached. */
+export const currentBranch = Effect.fn("TaskCleanup.currentBranch")(function* (cwd: string) {
+  const git = yield* GitVcsDriver.GitVcsDriver;
+  const result = yield* git.execute({
+    operation: OPERATION,
+    cwd,
+    args: ["symbolic-ref", "--quiet", "--short", "HEAD"],
+    allowNonZeroExit: true,
+  });
+  const branch = result.stdout.trim();
+  return result.exitCode === 0 && branch.length > 0 ? branch : null;
 });
 
 /**
@@ -45,7 +66,7 @@ export const branchMergeState = Effect.fn("TaskCleanup.branchMergeState")(functi
 ) {
   const git = yield* GitVcsDriver.GitVcsDriver;
   const localRef = `refs/heads/${branch}`;
-  if (!(yield* refExists(cwd, localRef))) {
+  if ((yield* resolveCommit(cwd, localRef)) === null) {
     return { exists: false, merged: true, unmergedCommitCount: 0 } satisfies BranchMergeState;
   }
   const result = yield* git.execute({
@@ -62,16 +83,32 @@ export const branchMergeState = Effect.fn("TaskCleanup.branchMergeState")(functi
   } satisfies BranchMergeState;
 });
 
+/**
+ * Where a recorded worktree path stands: Git still lists it, it is gone from disk, or a folder
+ * that Git does not list as a worktree sits there.
+ */
+export type WorktreePathState = "live" | "gone" | "stray";
+
+export interface CleanupPath {
+  readonly state: WorktreePathState;
+  /** A thread outside the task works there. */
+  readonly foreign: boolean;
+  /** The project's main checkout. */
+  readonly mainCheckout: boolean;
+}
+
 /** What cleanup must know about one project of the task. */
 export interface CleanupProject {
   /** The project's main checkout, where git commands run. Never removed. */
   readonly cwd: string;
-  /** Worktrees Git still lists for the repository. */
-  readonly livePaths: ReadonlySet<string>;
-  /** Worktree paths and branches that a thread outside the task uses. */
-  readonly foreignPaths: ReadonlySet<string>;
+  /** Every recorded worktree path of the task in this project. */
+  readonly paths: ReadonlyMap<string, CleanupPath>;
+  /** Branches that a thread outside the task uses. */
   readonly foreignBranches: ReadonlySet<string>;
-  readonly defaultBranch: string;
+  /** The default branch and the main checkout's branch; never deleted. */
+  readonly protectedBranches: ReadonlySet<string>;
+  /** Default branch names to measure "merged" against, best first. */
+  readonly baseBranches: ReadonlyArray<string>;
 }
 
 type CleanupWorktree = Pick<
@@ -83,16 +120,25 @@ type CleanupWorktree = Pick<
 export const isPendingWorktree = (worktree: CleanupWorktree) =>
   worktree.worktreePath === null && worktree.removedAt === null;
 
-/** The worktree's path when cleanup may offer to remove it. */
-export const removableWorktreePath = (
+/** Why cleanup may not remove the worktree, or null when it may. */
+export const worktreeBlocker = (
   worktree: CleanupWorktree,
   project: CleanupProject,
 ): string | null => {
   const path = worktree.worktreePath;
-  if (path === null || worktree.removedAt !== null) return null;
-  if (path === project.cwd || project.foreignPaths.has(path)) return null;
-  return path;
+  if (path === null || worktree.removedAt !== null) return "it is not a live worktree of this task";
+  const known = project.paths.get(path);
+  if (known === undefined) return "it is not a worktree of this task";
+  if (known.mainCheckout) return "it is the project's main folder, not a task worktree";
+  if (known.foreign) return "a thread outside this task uses it";
+  if (known.state === "stray")
+    return "Git no longer lists it as a worktree, so it is left in place";
+  return null;
 };
+
+/** The worktree's path when cleanup may offer to remove it. */
+export const removableWorktreePath = (worktree: CleanupWorktree, project: CleanupProject) =>
+  worktreeBlocker(worktree, project) === null ? worktree.worktreePath : null;
 
 /**
  * Whether cleanup may offer to delete the branch. `records` are the task's worktrees in the
@@ -103,9 +149,10 @@ export const isDeletableBranch = (
   records: ReadonlyArray<CleanupWorktree>,
   project: CleanupProject,
 ) => {
-  if (branch === project.defaultBranch || project.foreignBranches.has(branch)) return false;
+  if (project.protectedBranches.has(branch) || project.foreignBranches.has(branch)) return false;
   const own = records.filter((worktree) => worktree.branch === branch);
-  if (own.length === 0 || own.every((worktree) => worktree.branchDeletedAt !== null)) return false;
+  // No record, or all deleted already: `every` is true for an empty list.
+  if (own.every((worktree) => worktree.branchDeletedAt !== null)) return false;
   return own.every(
     (worktree) =>
       !isPendingWorktree(worktree) &&
@@ -118,6 +165,6 @@ export const isDeletableBranch = (
  * default branch; an extra one against its own base, usually the task branch.
  */
 export const mergeBaseCandidates = (worktree: CleanupWorktree, project: CleanupProject) => {
-  const defaults = [`origin/${project.defaultBranch}`, project.defaultBranch];
+  const defaults = project.baseBranches.flatMap((branch) => [`origin/${branch}`, branch]);
   return worktree.kind === "extra" ? [worktree.baseRef, ...defaults] : defaults;
 };
