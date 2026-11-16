@@ -542,7 +542,7 @@ it.effect("newThread extra without a shared worktree starts the shared one first
         ...launchOptions,
       }),
     );
-    assert.strictEqual(error.code, "worktree_preparing");
+    assert.strictEqual(error.code, "shared_worktree_started");
     assert.strictEqual(launches.length, 1);
     assert.deepStrictEqual(launches[0]!.workspaceStrategy, {
       type: "worktree",
@@ -938,3 +938,53 @@ it.effect("a removed worktree an old chat recreated is the task's again", () => 
     ]);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("an interrupted start still links the chat its launch created", () =>
+  Effect.gen(function* () {
+    const entered = yield* Deferred.make<void>();
+    const gate = yield* Deferred.make<void>();
+    const { layer, launches } = makeTestLayer({ entered, gate });
+    yield* Effect.gen(function* () {
+      const tasks = yield* TaskService.TaskService;
+      const task = yield* newTask("Interrupted");
+      const starting = yield* tasks
+        .start({ id: task.id, commandId: CommandId.make("interrupted"), ...launchOptions })
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      // The client gives up while the launch is creating the chat; the request lands at once.
+      yield* Effect.sync(() => starting.interruptUnsafe());
+      yield* Deferred.succeed(gate, undefined);
+      yield* Fiber.await(starting);
+      const [listed] = (yield* tasks.list()).tasks;
+      assert.strictEqual(launches.length, 1);
+      assert.deepStrictEqual(listed?.threadIds, [ThreadId.make("launched-interrupted")]);
+      assert.deepStrictEqual(
+        listed?.worktrees.map((worktree) => worktree.branch),
+        ["task/interrupted"],
+      );
+    }).pipe(Effect.provide(layer));
+  }),
+);
+
+it.effect("an edit from a stale editor keeps the projects the task's chats use", () =>
+  Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const task = yield* newTask("Stale editor");
+    yield* tasks.attachThread({
+      id: task.id,
+      threadId: ThreadId.make("th-x"),
+      moveFromOtherTask: false,
+    });
+    // The editor was opened before the chat in p2 joined the task.
+    const edited = yield* tasks.upsert({
+      id: task.id,
+      title: "Renamed",
+      description: "",
+      link: null,
+      primaryProjectId: p1,
+      projectIds: [p1],
+    });
+    assert.strictEqual(edited.task.title, "Renamed");
+    assert.deepStrictEqual(edited.task.projectIds, [p1, p2]);
+  }).pipe(Effect.provide(testLayer)),
+);

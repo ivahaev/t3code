@@ -4,6 +4,7 @@ import type {
   ReviewDiffPreviewInput,
   ReviewDiffPreviewResult,
   Task,
+  TaskError,
   TaskWorktree,
   ThreadId,
 } from "@t3tools/contracts";
@@ -163,14 +164,17 @@ export function worktreeDiffStat(
   return { additions, deletions };
 }
 
-export type TaskErrorCode = "already_attached" | "worktree_preparing" | "not_found";
+export type TaskErrorCode = NonNullable<TaskError["code"]>;
 
 /** The `code` of a `TaskError` the server answered with, if the failure is one. */
 export function taskErrorCode(error: unknown): TaskErrorCode | null {
   if (typeof error !== "object" || error === null) return null;
   const { _tag, code } = error as { readonly _tag?: unknown; readonly code?: unknown };
   return _tag === "TaskError" &&
-    (code === "already_attached" || code === "worktree_preparing" || code === "not_found")
+    (code === "already_attached" ||
+      code === "worktree_preparing" ||
+      code === "not_found" ||
+      code === "shared_worktree_started")
     ? code
     : null;
 }

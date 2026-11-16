@@ -170,6 +170,14 @@ export type TaskCleanupResult = typeof TaskCleanupResult.Type;
 export class TaskError extends Schema.TaggedError<TaskError>()("TaskError", {
   message: Schema.String,
   taskId: Schema.optional(TaskId),
-  code: Schema.optional(Schema.Literals(["already_attached", "worktree_preparing", "not_found"])),
+  code: Schema.optional(
+    Schema.Literals([
+      "already_attached",
+      "worktree_preparing",
+      "not_found",
+      // An extra chat asked first for the shared worktree; its first chat started instead.
+      "shared_worktree_started",
+    ]),
+  ),
   cause: Schema.optional(Schema.Defect()),
 }) {}

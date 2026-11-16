@@ -17,6 +17,17 @@ export function toastTaskCommandFailure(
   if (result._tag !== "Failure") return false;
   if (isAtomCommandInterrupted(result)) return true;
   const error = squashAtomCommandFailure(result);
+  // Not a failure: the first chat of the task started, and the requested one comes on retry.
+  if (taskErrorCode(error) === "shared_worktree_started") {
+    toastManager.add(
+      stackedThreadToast({
+        type: "warning",
+        title: "Первый чат задачи уже запущен",
+        description: (error as Error).message,
+      }),
+    );
+    return true;
+  }
   toastManager.add(
     stackedThreadToast({
       type: "error",

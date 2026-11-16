@@ -358,6 +358,8 @@ or never offer in **Settings → Задачи**. **Всегда** removes only c
 merged branches and asks about the rest.
 
 If you move a task out of **Готово** after its branch was deleted, its next thread
-creates the branch again from the default branch. Deleting a thread never removes a
+creates the branch again from the default branch. If only the worktree was removed and the
+branch kept, the next thread continues on that branch. Deleting a thread never removes a
 worktree its task still uses, and deleting a task keeps its threads, worktrees, and
-branches.
+branches. Storage cleanup also leaves a task's worktrees alone while the task keeps them,
+so with **Никогда** or in an archived task they stay until the task's own cleanup removes them.

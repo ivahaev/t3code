@@ -45,7 +45,10 @@ export function ThreadTaskChip({
           // The row opens the chat; the chip opens the task instead, also by Enter or double-click.
           onClick={(event) => event.stopPropagation()}
           onDoubleClick={(event) => event.stopPropagation()}
-          onKeyDown={(event) => event.stopPropagation()}
+          // Only activation keys; arrows still move through the sidebar rows.
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+          }}
         />
       }
     >

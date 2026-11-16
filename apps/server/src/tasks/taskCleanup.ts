@@ -128,13 +128,12 @@ export const worktreeBlocker = (
   project: CleanupProject,
 ): string | null => {
   const path = worktree.worktreePath;
-  if (path === null || worktree.removedAt !== null) return "it is not a live worktree of this task";
+  if (path === null || worktree.removedAt !== null) return "это не действующий worktree задачи";
   const known = project.paths.get(path);
-  if (known === undefined) return "it is not a worktree of this task";
-  if (known.mainCheckout) return "it is the project's main folder, not a task worktree";
-  if (known.foreign) return "a thread outside this task uses it";
-  if (known.state === "stray")
-    return "Git no longer lists it as a worktree, so it is left in place";
+  if (known === undefined) return "это не worktree задачи";
+  if (known.mainCheckout) return "это основная папка проекта, а не worktree задачи";
+  if (known.foreign) return "им пользуется чат вне задачи";
+  if (known.state === "stray") return "Git больше не считает его worktree, поэтому папка остаётся";
   return null;
 };
 

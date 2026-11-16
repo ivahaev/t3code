@@ -57,13 +57,16 @@ export const layer = Layer.effect(
       cleanupScheduledTasks: Effect.fn("ResourceCleanupService.cleanupScheduledTasks")(function (
         threadId: ThreadId,
       ) {
-        return scheduledTasks.deleteForThread(threadId).pipe(
-          Effect.mapError(
-            (cause) => new ResourceCleanupError({ operation: "scheduled-tasks", threadId, cause }),
-          ),
-          // A deleted thread also leaves its board task.
-          Effect.andThen(tasks.removeThread(threadId)),
-        );
+        const cleanup = scheduledTasks
+          .deleteForThread(threadId)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new ResourceCleanupError({ operation: "scheduled-tasks", threadId, cause }),
+            ),
+          );
+        // A deleted thread also leaves its board task, even if its scheduled tasks stay.
+        return Effect.ensuring(cleanup, tasks.removeThread(threadId));
       }),
       cleanupTerminals: Effect.fn("ResourceCleanupService.cleanupTerminals")(function (
         threadId: string,
