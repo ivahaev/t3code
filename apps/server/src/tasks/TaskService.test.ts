@@ -1,5 +1,8 @@
 import { assert, it } from "@effect/vitest";
 import {
+  CommandId,
+  type ModelSelection,
+  type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
   type Project,
   ProjectId,
@@ -13,6 +16,7 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
+import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as TaskService from "./TaskService.ts";
@@ -39,24 +43,53 @@ const shells = new Map<string, OrchestrationV2ThreadShell>([
   ["th-plain", shell("th-plain", { projectId: p1 })],
 ]);
 
-const testLayer = TaskService.layer.pipe(
-  Layer.provideMerge(
-    Layer.mergeAll(
-      TaskStore.layer,
-      Layer.mock(ThreadManagementService.ThreadManagementService)({
-        getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
-      }),
-      Layer.mock(ProjectService.ProjectService)({
-        getById: (projectId) =>
-          Effect.succeedSome({ id: projectId, workspaceRoot: `/repo/${projectId}` } as Project),
-      }),
-      Layer.mock(GitWorkflowService.GitWorkflowService)({
-        resolveDefaultBranchName: () => Effect.succeed("main"),
-      }),
+// Every test gets its own launch recorder, so launches never leak between tests.
+const makeTestLayer = () => {
+  const launches: Array<ThreadLaunchService.ThreadLaunchInput> = [];
+  const layer = TaskService.layer.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        TaskStore.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadShell: (threadId) => Effect.succeed(shells.get(threadId) ?? null),
+        }),
+        Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+          checkWorktreeBase: () => Effect.void,
+          launch: (input) =>
+            Effect.sync(() => {
+              launches.push(input);
+              const strategy = input.workspaceStrategy;
+              return {
+                threadId: ThreadId.make(`launched-${input.commandId}`),
+                resumed: false,
+                projection: {
+                  thread: { branch: strategy.type === "root" ? null : (strategy.branch ?? null) },
+                } as unknown as OrchestrationV2ThreadProjection,
+              };
+            }),
+        }),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: (projectId) =>
+            Effect.succeedSome({ id: projectId, workspaceRoot: `/repo/${projectId}` } as Project),
+        }),
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          resolveDefaultBranchName: () => Effect.succeed("main"),
+          listLocalBranchNames: () => Effect.succeed(["main"]),
+        }),
+      ),
     ),
-  ),
-  Layer.provide(NodeSqliteClient.layer({ filename: ":memory:" })),
-);
+    Layer.provide(NodeSqliteClient.layer({ filename: ":memory:" })),
+  );
+  return { layer, launches };
+};
+
+const testLayer = makeTestLayer().layer;
+
+const launchOptions = {
+  modelSelection: { instanceId: "codex", model: "gpt-5" } as unknown as ModelSelection,
+  runtimeMode: "full-access",
+  interactionMode: "default",
+} as const;
 
 const newTask = Effect.fn(function* (title: string = "Task") {
   const tasks = yield* TaskService.TaskService;
@@ -225,4 +258,219 @@ it("resolveTaskProjects marks projects missing from the environment unavailable"
     { projectId: p1, available: true },
     { projectId: p2, available: false },
   ]);
+});
+
+it.effect(
+  "start launches the first thread in a task worktree and marks the task in progress",
+  () => {
+    const { layer, launches } = makeTestLayer();
+    return Effect.gen(function* () {
+      const tasks = yield* TaskService.TaskService;
+      const task = yield* newTask("Оплата картой");
+      const started = yield* tasks.start({
+        id: task.id,
+        commandId: CommandId.make("start-1"),
+        ...launchOptions,
+      });
+      assert.strictEqual(launches.length, 1);
+      const launch = launches[0]!;
+      assert.strictEqual(launch.projectId, p1);
+      assert.strictEqual(launch.title, "Оплата картой");
+      assert.deepStrictEqual(launch.workspaceStrategy, {
+        type: "worktree",
+        baseRef: "origin/main",
+        branch: "task/oplata-kartoj",
+        startFromOrigin: true,
+      });
+      assert.isTrue(launch.initialMessage?.text.startsWith("Оплата картой"));
+      assert.strictEqual(started.threadId, ThreadId.make("launched-start-1"));
+      assert.strictEqual(started.task.status, "in_progress");
+      assert.deepStrictEqual(started.task.threadIds, [started.threadId]);
+      assert.deepStrictEqual(started.task.worktrees, [
+        {
+          projectId: p1,
+          branch: "task/oplata-kartoj",
+          baseRef: "origin/main",
+          kind: "shared",
+          worktreePath: null,
+          removedAt: null,
+          branchDeletedAt: null,
+        },
+      ]);
+
+      // Review Focus 2: a started task only changes status again.
+      yield* tasks.setStatus({ id: task.id, status: "review" });
+      const again = yield* tasks.start({
+        id: task.id,
+        commandId: CommandId.make("start-2"),
+        ...launchOptions,
+      });
+      assert.strictEqual(launches.length, 1);
+      assert.strictEqual(again.threadId, started.threadId);
+      assert.strictEqual(again.task.status, "in_progress");
+      assert.deepStrictEqual(again.task.worktrees, started.task.worktrees);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect("newThread waits for the shared worktree path, then reuses it", () => {
+  const { layer, launches } = makeTestLayer();
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const task = yield* newTask("Shared path");
+    const started = yield* tasks.start({
+      id: task.id,
+      commandId: CommandId.make("shared-start"),
+      ...launchOptions,
+    });
+    const request = {
+      id: task.id,
+      projectId: p1,
+      workspace: "shared",
+      text: "Second agent",
+      ...launchOptions,
+    } as const;
+
+    // Review Focus 1: the shared worktree exists, but no thread knows its path yet.
+    const preparing: TaskError = yield* Effect.flip(
+      tasks.newThread({ ...request, commandId: CommandId.make("shared-early") }),
+    );
+    assert.strictEqual(preparing.code, "worktree_preparing");
+    assert.strictEqual(launches.length, 1);
+
+    shells.set(
+      started.threadId,
+      shell(started.threadId, {
+        projectId: p1,
+        worktreePath: "/wt/shared",
+        branch: "task/shared-path",
+      }),
+    );
+    const second = yield* tasks.newThread({ ...request, commandId: CommandId.make("shared-2") });
+    assert.strictEqual(launches.length, 2);
+    assert.deepStrictEqual(launches[1]!.workspaceStrategy, {
+      type: "existing_worktree",
+      worktreePath: "/wt/shared",
+      branch: "task/shared-path",
+    });
+    assert.strictEqual(launches[1]!.initialMessage?.text, "Second agent");
+    assert.deepStrictEqual(second.task.threadIds, [started.threadId, second.threadId]);
+    assert.strictEqual(second.task.worktrees[0]?.worktreePath, "/wt/shared");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("newThread extra branches off the shared worktree's branch", () => {
+  const { layer, launches } = makeTestLayer();
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const task = yield* newTask("Extra work");
+    const started = yield* tasks.start({
+      id: task.id,
+      commandId: CommandId.make("extra-start"),
+      ...launchOptions,
+    });
+    shells.set(
+      started.threadId,
+      shell(started.threadId, {
+        projectId: p1,
+        worktreePath: "/wt/extra",
+        branch: "task/extra-work",
+      }),
+    );
+    const extra = yield* tasks.newThread({
+      id: task.id,
+      commandId: CommandId.make("extra-1"),
+      projectId: p1,
+      workspace: "extra",
+      text: "Try another way",
+      ...launchOptions,
+    });
+    const strategy = launches[1]!.workspaceStrategy;
+    assert.strictEqual(strategy.type, "worktree");
+    if (strategy.type !== "worktree") return;
+    assert.strictEqual(strategy.baseRef, "task/extra-work");
+    assert.strictEqual(strategy.startFromOrigin, false);
+    assert.isTrue(strategy.branch?.startsWith("task/extra-work-"));
+    const recorded = extra.task.worktrees.find((worktree) => worktree.kind === "extra");
+    assert.deepStrictEqual(recorded, {
+      projectId: p1,
+      branch: strategy.branch!,
+      baseRef: "task/extra-work",
+      kind: "extra",
+      worktreePath: null,
+      removedAt: null,
+      branchDeletedAt: null,
+    });
+    assert.deepStrictEqual(extra.task.threadIds, [started.threadId, extra.threadId]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("newThread in a new project opens its shared worktree; root records no worktree", () => {
+  const { layer, launches } = makeTestLayer();
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const task = yield* newTask("Cross repo");
+    const shared = yield* tasks.newThread({
+      id: task.id,
+      commandId: CommandId.make("cross-1"),
+      projectId: p2,
+      workspace: "shared",
+      text: "Do it in p2",
+      ...launchOptions,
+    });
+    assert.deepStrictEqual(launches[0]!.workspaceStrategy, {
+      type: "worktree",
+      baseRef: "origin/main",
+      branch: "task/cross-repo",
+      startFromOrigin: true,
+    });
+    assert.deepStrictEqual(shared.task.projectIds, [p1, p2]);
+    assert.deepStrictEqual(
+      shared.task.worktrees.map((worktree) => [worktree.projectId, worktree.kind]),
+      [[p2, "shared"]],
+    );
+    const root = yield* tasks.newThread({
+      id: task.id,
+      commandId: CommandId.make("cross-root"),
+      projectId: p1,
+      workspace: "root",
+      text: "At the root",
+      ...launchOptions,
+    });
+    assert.deepStrictEqual(launches[1]!.workspaceStrategy, { type: "root" });
+    assert.strictEqual(root.task.worktrees.length, 1);
+    assert.deepStrictEqual(root.task.threadIds, [shared.threadId, root.threadId]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("newThread extra without a shared worktree starts the shared one first", () => {
+  const { layer, launches } = makeTestLayer();
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const task = yield* newTask("No shared yet");
+    const error: TaskError = yield* Effect.flip(
+      tasks.newThread({
+        id: task.id,
+        commandId: CommandId.make("extra-first"),
+        projectId: p1,
+        workspace: "extra",
+        text: "Side quest",
+        ...launchOptions,
+      }),
+    );
+    assert.strictEqual(error.code, "worktree_preparing");
+    assert.strictEqual(launches.length, 1);
+    assert.deepStrictEqual(launches[0]!.workspaceStrategy, {
+      type: "worktree",
+      baseRef: "origin/main",
+      branch: "task/no-shared-yet",
+      startFromOrigin: true,
+    });
+    const [listed] = (yield* tasks.list()).tasks;
+    assert.deepStrictEqual(
+      listed?.worktrees.map((worktree) => worktree.kind),
+      ["shared"],
+    );
+    assert.strictEqual(listed?.threadIds.length, 1);
+  }).pipe(Effect.provide(layer));
 });

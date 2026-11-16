@@ -308,7 +308,9 @@ const layerScheduledTaskProvided = ScheduledTaskService.layer.pipe(
   ),
 );
 const layerTaskServiceProvided = TaskService.layer.pipe(
-  Layer.provide(Layer.merge(TaskStore.layer, layerThreadManagementProvided)),
+  Layer.provide(
+    Layer.mergeAll(TaskStore.layer, layerThreadManagementProvided, layerThreadLaunchProvided),
+  ),
 );
 const layerScratchThreadPromotionProvided = ScratchThreadPromotion.layer.pipe(
   Layer.provide(
