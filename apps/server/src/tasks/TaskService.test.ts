@@ -2,6 +2,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   CommandId,
+  GitCommandError,
   type ModelSelection,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadProjection,
@@ -63,16 +64,20 @@ interface LaunchControl {
   fail?: boolean;
   /** Runs on every thread shell read. */
   onShellRead?: Effect.Effect<void>;
+  /** Local branches besides `main`. */
+  localBranches?: ReadonlyArray<string>;
+  checkoutFails?: boolean;
 }
 
 /** Domain events the task service hears; tests offer the ones they need. */
 class TestEvents extends Context.Service<TestEvents, Queue.Queue<OrchestrationV2DomainEvent>>()(
-  "test/TaskService/TestEvents",
+  "t3/tasks/TaskService.test/TestEvents",
 ) {}
 
 // Every test gets its own shells and launch recorder, so nothing leaks between tests.
 const makeTestLayer = (control: LaunchControl = {}) => {
   const launches: Array<ThreadLaunchService.ThreadLaunchInput> = [];
+  const createdWorktrees: Array<string> = [];
   const shells = new Map<string, OrchestrationV2ThreadShell>([
     ["th-x", shell("th-x", { projectId: p2, worktreePath: "/wt/x", branch: "feat/x" })],
     ["th-plain", shell("th-plain", { projectId: p1 })],
@@ -136,14 +141,30 @@ const makeTestLayer = (control: LaunchControl = {}) => {
         NodeServices.layer,
         Layer.mock(GitWorkflowService.GitWorkflowService)({
           resolveDefaultBranchName: () => Effect.succeed("main"),
-          listLocalBranchNames: () => Effect.succeed(["main"]),
+          listLocalBranchNames: () => Effect.succeed(["main", ...(control.localBranches ?? [])]),
+          createWorktree: (input) =>
+            control.checkoutFails
+              ? Effect.fail(
+                  new GitCommandError({
+                    operation: "createWorktree",
+                    command: "git worktree add",
+                    cwd: input.cwd,
+                    detail: "already checked out",
+                  }),
+                )
+              : Effect.sync(() => {
+                  createdWorktrees.push(input.refName);
+                  return {
+                    worktree: { path: `/wt/again/${input.refName}`, refName: input.refName },
+                  } as never;
+                }),
         }),
       ),
     ),
     Layer.provideMerge(NodeSqliteClient.layer({ filename: ":memory:" })),
     Layer.provideMerge(Layer.effect(TestEvents, Queue.unbounded<OrchestrationV2DomainEvent>())),
   );
-  return { layer, launches, shells };
+  return { layer, launches, shells, createdWorktrees };
 };
 
 const testLayer = makeTestLayer().layer;
@@ -828,5 +849,92 @@ it.effect("list leaves out a task deleted while its worktree paths are read", ()
     );
     control.onShellRead = store.delete(task.id);
     assert.deepStrictEqual((yield* tasks.list()).tasks, []);
+  }).pipe(Effect.provide(layer));
+});
+
+const keptRecord = {
+  projectId: p1,
+  branch: "task/kept",
+  baseRef: "origin/main",
+  kind: "shared",
+  worktreePath: "/wt/kept",
+  removedAt: "2026-11-10T00:00:00.000Z",
+  branchDeletedAt: null,
+} as const;
+
+it.effect("the next chat after cleanup kept the branch checks that branch out again", () => {
+  const { layer, launches, createdWorktrees } = makeTestLayer({ localBranches: ["task/kept"] });
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const store = yield* TaskStore.TaskStore;
+    const task = yield* newTask("Kept");
+    yield* store.update({ ...task, status: "done", worktrees: [keptRecord] });
+    const started = yield* tasks.start({
+      id: task.id,
+      commandId: CommandId.make("kept-start"),
+      ...launchOptions,
+    });
+    assert.deepStrictEqual(createdWorktrees, ["task/kept"]);
+    assert.deepStrictEqual(launches[0]?.workspaceStrategy, {
+      type: "existing_worktree",
+      worktreePath: "/wt/again/task/kept",
+      branch: "task/kept",
+    });
+    assert.deepStrictEqual(started.task.worktrees, [
+      { ...keptRecord, worktreePath: "/wt/again/task/kept", removedAt: null },
+    ]);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect(
+  "a failed checkout of the kept branch leaves it kept; a failed launch keeps the worktree",
+  () => {
+    const control: LaunchControl = { localBranches: ["task/kept"], checkoutFails: true };
+    const { layer } = makeTestLayer(control);
+    return Effect.gen(function* () {
+      const tasks = yield* TaskService.TaskService;
+      const store = yield* TaskStore.TaskStore;
+      const task = yield* newTask("Kept");
+      yield* store.update({ ...task, worktrees: [keptRecord] });
+      const refused = yield* Effect.flip(tasks.newThread(sharedRequest(task.id, "checkout-fails")));
+      assert.include(refused.message, "task/kept");
+      assert.deepStrictEqual((yield* store.get(task.id))?.worktrees, [keptRecord]);
+      control.checkoutFails = false;
+      control.fail = true;
+      yield* Effect.flip(tasks.newThread(sharedRequest(task.id, "launch-fails")));
+      // The worktree was made before the launch failed, so the task keeps it.
+      assert.deepStrictEqual((yield* store.get(task.id))?.worktrees, [
+        { ...keptRecord, worktreePath: "/wt/again/task/kept", removedAt: null },
+      ]);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect("a removed worktree an old chat recreated is the task's again", () => {
+  const { layer, launches, shells, createdWorktrees } = makeTestLayer({
+    localBranches: ["task/kept"],
+  });
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const store = yield* TaskStore.TaskStore;
+    const task = yield* newTask("Kept");
+    // Reopening the old chat put its folder back; any existing folder stands in for it.
+    const restoredPath = process.cwd();
+    const oldChat = ThreadId.make("th-old");
+    shells.set(
+      oldChat,
+      shell(oldChat, { projectId: p1, worktreePath: restoredPath, branch: "task/kept" }),
+    );
+    yield* store.update({ ...task, worktrees: [keptRecord], threadIds: [oldChat] });
+    yield* tasks.newThread(sharedRequest(task.id, "after-restore"));
+    assert.deepStrictEqual(createdWorktrees, []);
+    assert.deepStrictEqual(launches[0]?.workspaceStrategy, {
+      type: "existing_worktree",
+      worktreePath: restoredPath,
+      branch: "task/kept",
+    });
+    assert.deepStrictEqual((yield* store.get(task.id))?.worktrees, [
+      { ...keptRecord, worktreePath: restoredPath, removedAt: null },
+    ]);
   }).pipe(Effect.provide(layer));
 });

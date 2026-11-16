@@ -133,6 +133,13 @@ const fillWorktreePaths = (
 
 const hasPendingWorktree = (task: Task) => task.worktrees.some(isPendingWorktree);
 
+/** Cleanup removed the worktree but kept its branch, so the next chat checks the branch out. */
+const isKeptBranch = (worktree: TaskWorktree) =>
+  worktree.removedAt !== null && worktree.branchDeletedAt === null;
+
+const recordKey = (worktree: Pick<TaskWorktree, "projectId" | "branch">) =>
+  `${worktree.projectId}\u0000${worktree.branch}`;
+
 /** A run that ended without a worktree path: its workspace preparation failed. */
 const ENDED_RUN_STATUSES: ReadonlySet<OrchestrationV2ThreadShell["status"]> = new Set([
   "failed",
@@ -209,9 +216,7 @@ const make = Effect.gen(function* () {
     .getSetting(CLEANUP_MODE_KEY)
     .pipe(Effect.map((value) => (value !== null && isCleanupMode(value) ? value : "ask")));
 
-  /** Shells of the task's threads, read only while one of its worktrees waits for a path. */
-  const readPendingShells = Effect.fn("TaskService.readPendingShells")(function* (task: Task) {
-    if (!hasPendingWorktree(task)) return [];
+  const readTaskShells = Effect.fn("TaskService.readTaskShells")(function* (task: Task) {
     return (yield* Effect.forEach(
       task.threadIds,
       (threadId) =>
@@ -220,36 +225,74 @@ const make = Effect.gen(function* () {
     )).filter((shell) => shell !== null);
   });
 
+  /** Shells of the task's threads, read only while one of its worktrees waits for a path. */
+  const readPendingShells = (task: Task) =>
+    hasPendingWorktree(task) ? readTaskShells(task) : Effect.succeed([]);
+
   /**
    * Fills missing worktree paths from the task's own live threads and saves them once found.
    * Launch creates the worktree after it returns, so the path comes late. Cleanup reuses it.
+   * `revived` brings back removed records whose folder a task chat recreated, by record key.
    * Null when the task was deleted meanwhile.
    */
   const resolveWorktreePaths = Effect.fn("TaskService.resolveWorktreePaths")(function* (
     task: Task,
     shells: ReadonlyArray<TaskStore.ThreadWorkspace & { readonly deletedAt: unknown }>,
+    revived: ReadonlyMap<string, string> = new Map(),
   ) {
     const live = shells.filter((shell) => shell.deletedAt === null);
-    if (fillWorktreePaths(task.worktrees, live).every((w, i) => w === task.worktrees[i])) {
-      return task;
-    }
+    const apply = (worktrees: ReadonlyArray<TaskWorktree>) =>
+      fillWorktreePaths(worktrees, live).map((worktree) => {
+        const path = isKeptBranch(worktree) ? revived.get(recordKey(worktree)) : undefined;
+        return path === undefined ? worktree : { ...worktree, worktreePath: path, removedAt: null };
+      });
+    if (apply(task.worktrees).every((w, i) => w === task.worktrees[i])) return task;
     return yield* serialized(
       Effect.gen(function* () {
         const current = yield* store.get(task.id);
         if (current === null) return null;
-        const worktrees = fillWorktreePaths(current.worktrees, live);
+        const worktrees = apply(current.worktrees);
         if (worktrees.every((w, i) => w === current.worktrees[i])) return current;
         return (yield* save({ ...current, worktrees })).task;
       }),
     );
   });
 
-  const resolveExistingWorktreePaths = Effect.fn("TaskService.resolveExistingWorktreePaths")(
-    function* (task: Task, shells: ReadonlyArray<TaskShell>) {
-      const resolved = yield* resolveWorktreePaths(task, shells);
-      return resolved ?? (yield* requireTask(task.id));
-    },
-  );
+  /**
+   * Removed worktrees whose branch stays and whose folder a task chat has recreated, as
+   * reopening an old chat does: the task takes them back instead of checking the branch out
+   * a second time.
+   */
+  const revivedWorktreePaths = Effect.fn("TaskService.revivedWorktreePaths")(function* (
+    task: Task,
+    shells: ReadonlyArray<TaskShell>,
+  ) {
+    const revived = new Map<string, string>();
+    for (const worktree of task.worktrees) {
+      if (!isKeptBranch(worktree)) continue;
+      const path = shells.find(
+        (shell) =>
+          shell.deletedAt === null &&
+          shell.projectId === worktree.projectId &&
+          shell.branch === worktree.branch,
+      )?.worktreePath;
+      if (path == null) continue;
+      if (yield* fileSystem.exists(path).pipe(Effect.orElseSucceed(() => false))) {
+        revived.set(recordKey(worktree), path);
+      }
+    }
+    return revived;
+  });
+
+  /** The task with its worktree records brought up to date from its threads, and the shells. */
+  const resolveTaskWorktrees = Effect.fn("TaskService.resolveTaskWorktrees")(function* (
+    task: Task,
+  ) {
+    const shells = yield* readTaskShells(task);
+    const revived = yield* revivedWorktreePaths(task, shells);
+    const resolved = yield* resolveWorktreePaths(task, shells, revived);
+    return { task: resolved ?? (yield* requireTask(task.id)), shells };
+  });
 
   // Only tasks with a worktree still waiting for its path read thread shells; normally none.
   const list = Effect.fn("TaskService.list")(function* () {
@@ -618,9 +661,22 @@ const make = Effect.gen(function* () {
     return { task: (yield* save(updated)).task, threadId } satisfies TaskThreadResult;
   }, serialized);
 
+  /** How a reserved shared worktree comes to be: a new branch, or the task's kept one. */
+  type SharedStrategy =
+    | {
+        readonly type: "worktree";
+        readonly baseRef: string;
+        readonly branch: string;
+        readonly startFromOrigin: true;
+      }
+    | { readonly type: "existing_branch"; readonly branch: string };
+
   // The command that is creating a project's shared worktree right now, per task. Only code
   // under the write lock reads or changes it.
-  const sharedLaunches = new Map<string, CommandId>();
+  const sharedLaunches = new Map<
+    string,
+    { readonly commandId: CommandId; readonly strategy: SharedStrategy }
+  >();
   const sharedKey = (taskId: TaskId, projectId: ProjectId) => `${taskId}\u0000${projectId}`;
 
   const isLiveShared = (projectId: ProjectId) => (worktree: TaskWorktree) =>
@@ -631,12 +687,9 @@ const make = Effect.gen(function* () {
     | { readonly type: "ready"; readonly worktreePath: string; readonly branch: string }
     | {
         readonly type: "reserved";
-        readonly strategy: {
-          readonly type: "worktree";
-          readonly baseRef: string;
-          readonly branch: string;
-          readonly startFromOrigin: true;
-        };
+        readonly strategy: SharedStrategy;
+        /** The removed record the reservation replaced; a failed launch puts it back. */
+        readonly replaced: TaskWorktree | null;
       };
 
   /**
@@ -652,16 +705,10 @@ const make = Effect.gen(function* () {
   }) {
     const { projectId, commandId } = input;
     // Thread shells and git reads happen before the lock.
-    const shells = yield* readPendingShells(input.task);
-    const task = yield* resolveExistingWorktreePaths(input.task, shells);
+    const { task, shells } = yield* resolveTaskWorktrees(input.task);
     const known = task.worktrees.find(isLiveShared(projectId));
-    const fresh =
-      known === undefined
-        ? {
-            baseRef: yield* defaultBaseRef(projectId),
-            local: yield* localBranches(projectId),
-          }
-        : null;
+    const local = yield* localBranches(projectId);
+    const freshBaseRef = known === undefined ? yield* defaultBaseRef(projectId) : null;
     return yield* serialized(
       Effect.gen(function* () {
         const current = yield* requireTask(task.id);
@@ -670,15 +717,47 @@ const make = Effect.gen(function* () {
           return { type: "started", task: current, threadId: firstThreadId } as SharedWorktree;
         }
         const key = sharedKey(current.id, projectId);
+        const reserve = (strategy: SharedStrategy) => {
+          sharedLaunches.set(key, { commandId, strategy });
+          return strategy;
+        };
         const shared = current.worktrees.find(isLiveShared(projectId));
         if (shared === undefined) {
-          if (fresh === null) return yield* worktreePreparing(current.id);
-          const strategy = {
+          // Cleanup removed the worktree but kept the branch: the next one checks it out again.
+          const kept = current.worktrees.find(
+            (worktree) =>
+              worktree.projectId === projectId &&
+              worktree.kind === "shared" &&
+              isKeptBranch(worktree) &&
+              local.includes(worktree.branch),
+          );
+          if (kept !== undefined) {
+            yield* save({
+              ...current,
+              worktrees: current.worktrees.map((worktree) =>
+                worktree === kept
+                  ? newWorktree({
+                      projectId,
+                      branch: kept.branch,
+                      baseRef: kept.baseRef,
+                      kind: "shared",
+                    })
+                  : worktree,
+              ),
+            });
+            return {
+              type: "reserved",
+              strategy: reserve({ type: "existing_branch", branch: kept.branch }),
+              replaced: kept,
+            } as SharedWorktree;
+          }
+          if (freshBaseRef === null) return yield* worktreePreparing(current.id);
+          const strategy = reserve({
             type: "worktree",
-            baseRef: fresh.baseRef,
-            branch: taskBranchName(current.title, yield* takenBranches(projectId, fresh.local)),
+            baseRef: freshBaseRef,
+            branch: taskBranchName(current.title, yield* takenBranches(projectId, local)),
             startFromOrigin: true,
-          } as const;
+          });
           yield* save({
             ...current,
             worktrees: [
@@ -686,13 +765,12 @@ const make = Effect.gen(function* () {
               newWorktree({
                 projectId,
                 branch: strategy.branch,
-                baseRef: strategy.baseRef,
+                baseRef: freshBaseRef,
                 kind: "shared",
               }),
             ],
           });
-          sharedLaunches.set(key, commandId);
-          return { type: "reserved", strategy } as SharedWorktree;
+          return { type: "reserved", strategy, replaced: null } as SharedWorktree;
         }
         if (shared.worktreePath !== null) {
           return {
@@ -701,19 +779,17 @@ const make = Effect.gen(function* () {
             branch: shared.branch,
           } as SharedWorktree;
         }
-        const reserved: SharedWorktree = {
-          type: "reserved",
-          strategy: {
-            type: "worktree",
-            baseRef: shared.baseRef,
-            branch: shared.branch,
-            startFromOrigin: true,
-          },
-        };
         const inFlight = sharedLaunches.get(key);
-        // The same command again is a retry, and launch replays it.
+        // The same command again is a retry, and launch replays it. A checkout of the kept
+        // branch is not replayed, so its retry waits.
         if (inFlight !== undefined) {
-          if (inFlight === commandId) return reserved;
+          if (inFlight.commandId === commandId && inFlight.strategy.type === "worktree") {
+            return {
+              type: "reserved",
+              strategy: inFlight.strategy,
+              replaced: null,
+            } as SharedWorktree;
+          }
           return yield* worktreePreparing(current.id);
         }
         // A thread linked after the shells were read may be creating it.
@@ -729,9 +805,19 @@ const make = Effect.gen(function* () {
             shell.branch === shared.branch,
         );
         // No thread came of the reservation (its launch was cut short): this command takes it.
+        // A branch the cut launch already made is checked out instead of made again.
         if (owners.length === 0) {
-          sharedLaunches.set(key, commandId);
-          return reserved;
+          const strategy = reserve(
+            local.includes(shared.branch)
+              ? { type: "existing_branch", branch: shared.branch }
+              : {
+                  type: "worktree",
+                  baseRef: shared.baseRef,
+                  branch: shared.branch,
+                  startFromOrigin: true,
+                },
+          );
+          return { type: "reserved", strategy, replaced: null } as SharedWorktree;
         }
         // Every thread meant to create it ended without a worktree, so preparation failed.
         // The reservation is dropped, so the next thread creates the worktree again.
@@ -744,43 +830,91 @@ const make = Effect.gen(function* () {
     );
   });
 
+  /**
+   * Checks the task's kept branch out into a new worktree and records its path at once, so
+   * the worktree is the task's even if the launch after it fails.
+   */
+  const checkOutKeptBranch = Effect.fn("TaskService.checkOutKeptBranch")(function* (
+    task: Task,
+    projectId: ProjectId,
+    branch: string,
+  ) {
+    const project = yield* projects.getById(projectId).pipe(Effect.orElseSucceed(Option.none));
+    if (Option.isNone(project)) {
+      return yield* new TaskError({ message: "Проект задачи недоступен.", taskId: task.id });
+    }
+    const created = yield* git
+      .createWorktree({ cwd: project.value.workspaceRoot, refName: branch, path: null })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new TaskError({
+              message: `Не удалось снова открыть ветку задачи ${branch}: ${cause.message}`,
+              taskId: task.id,
+              cause,
+            }),
+        ),
+      );
+    const worktreePath = created.worktree.path;
+    yield* serialized(
+      Effect.gen(function* () {
+        const current = yield* store.get(task.id);
+        if (current === null) return;
+        const worktrees = current.worktrees.map((worktree) =>
+          isLiveShared(projectId)(worktree) &&
+          worktree.branch === branch &&
+          worktree.worktreePath === null
+            ? { ...worktree, worktreePath }
+            : worktree,
+        );
+        yield* save({ ...current, worktrees });
+      }),
+    );
+    return { type: "existing_worktree", worktreePath, branch } as const;
+  });
+
   /** Launches into a reserved shared worktree; a failed launch gives the reservation back. */
   const launchShared = Effect.fn("TaskService.launchShared")(function* (
     task: Task,
     projectId: ProjectId,
-    strategy: Extract<SharedWorktree, { type: "reserved" }>["strategy"],
+    reservation: Extract<SharedWorktree, { type: "reserved" }>,
     launch: Omit<TaskLaunch, "workspaceStrategy" | "projectId">,
     markInProgress: boolean,
   ) {
+    const { strategy, replaced } = reservation;
     const key = sharedKey(task.id, projectId);
     const release = serialized(
       Effect.sync(() => {
-        if (sharedLaunches.get(key) === launch.commandId) sharedLaunches.delete(key);
+        if (sharedLaunches.get(key)?.commandId === launch.commandId) sharedLaunches.delete(key);
       }),
     );
-    const launched = yield* launchThread(task, {
-      ...launch,
-      projectId,
-      workspaceStrategy: strategy,
+    const launched = yield* Effect.gen(function* () {
+      const workspaceStrategy =
+        strategy.type === "existing_branch"
+          ? yield* checkOutKeptBranch(task, projectId, strategy.branch)
+          : strategy;
+      return yield* launchThread(task, { ...launch, projectId, workspaceStrategy });
     }).pipe(
       Effect.onError(() =>
         serialized(
           Effect.gen(function* () {
-            if (sharedLaunches.get(key) !== launch.commandId) return;
+            if (sharedLaunches.get(key)?.commandId !== launch.commandId) return;
             sharedLaunches.delete(key);
             const current = yield* store.get(task.id);
             if (current === null) return;
-            const worktrees = current.worktrees.filter(
-              (worktree) =>
-                !(
-                  isLiveShared(projectId)(worktree) &&
-                  worktree.branch === strategy.branch &&
-                  worktree.worktreePath === null
-                ),
-            );
-            if (worktrees.length !== current.worktrees.length) {
-              yield* save({ ...current, worktrees });
-            }
+            const isReservation = (worktree: TaskWorktree) =>
+              isLiveShared(projectId)(worktree) &&
+              worktree.branch === strategy.branch &&
+              worktree.worktreePath === null;
+            if (!current.worktrees.some(isReservation)) return;
+            // A kept branch goes back to its removed record, so the next chat tries it again.
+            const worktrees =
+              replaced === null
+                ? current.worktrees.filter((worktree) => !isReservation(worktree))
+                : current.worktrees.map((worktree) =>
+                    isReservation(worktree) ? replaced : worktree,
+                  );
+            yield* save({ ...current, worktrees });
           }),
         ),
       ),
@@ -836,7 +970,7 @@ const make = Effect.gen(function* () {
         });
       }
       case "reserved":
-        return yield* launchShared(task, projectId, shared.strategy, launch, true);
+        return yield* launchShared(task, projectId, shared, launch, true);
     }
   });
 
@@ -876,7 +1010,7 @@ const make = Effect.gen(function* () {
       const result = yield* launchShared(
         task,
         projectId,
-        shared.strategy,
+        shared,
         forExtra
           ? {
               commandId: sharedCommandId,
@@ -929,8 +1063,7 @@ const make = Effect.gen(function* () {
 
   /** The task with worktree paths that its threads have reported since launch. */
   const resolveForCleanup = Effect.fn("TaskService.resolveForCleanup")(function* (id: TaskId) {
-    const task = yield* requireTask(id);
-    return yield* resolveExistingWorktreePaths(task, yield* readPendingShells(task));
+    return (yield* resolveTaskWorktrees(yield* requireTask(id))).task;
   });
 
   const runGit = <A>(
