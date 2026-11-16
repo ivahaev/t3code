@@ -125,7 +125,7 @@ export function TaskStartDialog({
   const startTask = useAtomCommand(tasksEnvironment.startTask, { label: "task start" });
 
   const start = async () => {
-    if (starting || selection === null || !canStart) return;
+    if (starting || selection === null || !canStart || project === null) return;
     setStarting(true);
     const result = await startTask({
       environmentId,
@@ -158,6 +158,11 @@ export function TaskStartDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
+          {project === null ? (
+            <p role="alert" className="mb-3 text-sm text-destructive-foreground">
+              Основной проект задачи недоступен в этом environment.
+            </p>
+          ) : null}
           <TaskAgentPicker environmentId={environmentId} disabled={starting} picker={picker} />
         </DialogPanel>
         <DialogFooter>
@@ -166,7 +171,7 @@ export function TaskStartDialog({
           </DialogClose>
           <Button
             size="sm"
-            disabled={starting || selection === null || !canStart}
+            disabled={starting || selection === null || !canStart || project === null}
             onClick={() => void start()}
           >
             В работу

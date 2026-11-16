@@ -31,3 +31,14 @@ export function toastTaskCommandFailure(
   );
   return true;
 }
+
+/** Says why a task cannot start, where the start dialog would otherwise open. */
+export function toastTaskStartBlocked(reason: string): void {
+  toastManager.add(
+    stackedThreadToast({
+      type: "error",
+      title: "Нельзя взять задачу в работу",
+      description: reason,
+    }),
+  );
+}

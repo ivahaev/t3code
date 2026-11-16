@@ -694,7 +694,7 @@ const make = Effect.gen(function* () {
   ) {
     const key = sharedKey(task.id, projectId);
     const release = serialized(
-      Effect.gen(function* () {
+      Effect.sync(() => {
         if (sharedLaunches.get(key) === launch.commandId) sharedLaunches.delete(key);
       }),
     );

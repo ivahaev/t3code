@@ -36,7 +36,8 @@ import {
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { moveTaskToDone } from "./moveTaskToDone";
 import { TaskCard, type TaskCardActions } from "./TaskCard";
-import { toastTaskCommandFailure } from "./taskCommandToast";
+import { toastTaskCommandFailure, toastTaskStartBlocked } from "./taskCommandToast";
+import { taskStartBlocker } from "./taskDetail.logic";
 import { taskAttention, type TaskAttention } from "./taskAttention.logic";
 import {
   boardColumns,
@@ -172,7 +173,16 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
     // A task without chats starts through the dialog; one that already has chats only moves.
     if (task.status === "backlog" && status === "in_progress" && task.threadIds.length === 0) {
       setKeyboardMovedKey(null);
-      setStarting(entry);
+      const blocker = taskStartBlocker(
+        task,
+        new Set(
+          projects
+            .filter((project) => project.environmentId === environmentId)
+            .map((project) => project.id),
+        ),
+      );
+      if (blocker === null) setStarting(entry);
+      else toastTaskStartBlocked(blocker);
       return;
     }
     const result =

@@ -1,4 +1,5 @@
 import {
+  EnvironmentId,
   ProjectId,
   TaskId,
   ThreadId,
@@ -6,10 +7,20 @@ import {
   type Task,
   type TaskWorktree,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
+import { AsyncResult } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
-import { groupTaskThreads, worktreeDiffInputs, worktreeDiffStat } from "./taskDetail.logic";
+import {
+  attachCandidates,
+  defaultNewThreadProject,
+  groupTaskThreads,
+  taskDiffTargets,
+  taskStartBlocker,
+  worktreeDiffState,
+  worktreeDiffStat,
+} from "./taskDetail.logic";
 
 const backend = ProjectId.make("project-backend");
 const frontend = ProjectId.make("project-frontend");
@@ -124,43 +135,63 @@ describe("groupTaskThreads", () => {
   });
 });
 
+const environmentId = EnvironmentId.make("local");
+
+const preview = (
+  kind: "branch-range" | "working-tree",
+  stats: ReadonlyArray<[number, number]>,
+): ReviewDiffPreviewResult => ({
+  cwd: "/work/wt",
+  generatedAt: DateTime.makeUnsafe(0),
+  sources: [
+    {
+      id: kind,
+      kind,
+      title: kind,
+      baseRef: null,
+      headRef: null,
+      diff: "",
+      diffHash: "hash",
+      truncated: false,
+      files: stats.map(([additions, deletions], index) => ({
+        path: `file-${index}`,
+        previousPath: null,
+        additions,
+        deletions,
+      })),
+    },
+  ],
+});
+
 describe("worktree diff", () => {
-  it("reads committed and uncommitted changes of a live worktree, nothing of a removed one", () => {
+  it("reads committed and uncommitted changes of live worktrees only, and none without file access", () => {
     const live = worktree({ branch: "task/card-pay" });
-    expect(worktreeDiffInputs(live)).toEqual({
-      branch: { cwd: "/work/wt/task/card-pay", baseRef: "origin/main", sourceKind: "branch-range" },
-      workingTree: { cwd: "/work/wt/task/card-pay", sourceKind: "working-tree" },
+    const removed = worktree({
+      branch: "old",
+      kind: "extra",
+      removedAt: "2026-11-03T00:00:00.000Z",
     });
-    expect(worktreeDiffInputs({ ...live, removedAt: "2026-11-03T00:00:00.000Z" })).toBeNull();
-    expect(worktreeDiffInputs({ ...live, worktreePath: null })).toBeNull();
+    const pathless = worktree({ branch: "new", kind: "extra", worktreePath: null });
+    const task = makeTask({ worktrees: [live, removed, pathless] });
+
+    expect(taskDiffTargets(environmentId, task, true)).toEqual({
+      worktrees: [live],
+      targets: [
+        {
+          environmentId,
+          input: {
+            cwd: "/work/wt/task/card-pay",
+            baseRef: "origin/main",
+            sourceKind: "branch-range",
+          },
+        },
+        { environmentId, input: { cwd: "/work/wt/task/card-pay", sourceKind: "working-tree" } },
+      ],
+    });
+    expect(taskDiffTargets(environmentId, task, false)).toEqual({ worktrees: [], targets: [] });
   });
 
   it("sums both sources once either has loaded", () => {
-    const preview = (
-      kind: "branch-range" | "working-tree",
-      stats: ReadonlyArray<[number, number]>,
-    ): ReviewDiffPreviewResult => ({
-      cwd: "/work/wt",
-      generatedAt: DateTime.makeUnsafe(0),
-      sources: [
-        {
-          id: kind,
-          kind,
-          title: kind,
-          baseRef: null,
-          headRef: null,
-          diff: "",
-          diffHash: "hash",
-          truncated: false,
-          files: stats.map(([additions, deletions], index) => ({
-            path: `file-${index}`,
-            previousPath: null,
-            additions,
-            deletions,
-          })),
-        },
-      ],
-    });
     expect(worktreeDiffStat([null, null])).toBeNull();
     expect(worktreeDiffStat([preview("branch-range", []), null])).toEqual({
       additions: 0,
@@ -175,5 +206,69 @@ describe("worktree diff", () => {
         preview("working-tree", [[5, 2]]),
       ]),
     ).toEqual({ additions: 245, deletions: 33 });
+  });
+
+  it("keeps a loaded source when the other fails, and waits for both", () => {
+    const loaded = AsyncResult.success(preview("branch-range", [[1, 1]]));
+    const failed = AsyncResult.failure<ReviewDiffPreviewResult, string>(Cause.fail("no access"));
+    const format = () => "no access";
+
+    expect(worktreeDiffState(loaded, failed, format)).toEqual({
+      branch: preview("branch-range", [[1, 1]]),
+      workingTree: null,
+      pending: false,
+      errors: ["Незакоммиченные изменения: no access"],
+    });
+    expect(worktreeDiffState(loaded, AsyncResult.initial(), format).pending).toBe(true);
+  });
+});
+
+describe("task actions", () => {
+  it("starts only from an available primary project and never in the archive", () => {
+    const task = makeTask({ status: "backlog", projectIds: [backend, frontend] });
+    expect(taskStartBlocker(task, new Set([backend]))).toBeNull();
+    expect(taskStartBlocker(task, new Set([frontend]))).toBe(
+      "Основной проект задачи недоступен в этом environment.",
+    );
+    expect(
+      taskStartBlocker({ ...task, archivedAt: "2026-11-03T00:00:00.000Z" }, new Set([backend])),
+    ).toBe("Задача в архиве.");
+  });
+
+  it("opens a new chat in the primary project, another available one, or none", () => {
+    const task = makeTask({ projectIds: [backend, frontend] });
+    expect(defaultNewThreadProject(task, new Set([backend, frontend]))).toBe(backend);
+    expect(defaultNewThreadProject(task, new Set([frontend]))).toBe(frontend);
+    expect(defaultNewThreadProject(task, new Set())).toBeNull();
+  });
+
+  it("finds chats to attach by title, branch or project, leaving out the task's and deleted ones", () => {
+    const chat = (id: string, title: string, branch: string | null, updatedAt: string) => ({
+      ...shell(id, backend, branch),
+      title,
+      updatedAt,
+      deletedAt: null as string | null,
+    });
+    const own = chat("own", "Оплата API", null, "2026-11-05");
+    const deleted = {
+      ...chat("deleted", "Оплата UI", null, "2026-11-05"),
+      deletedAt: "2026-11-06",
+    };
+    const older = chat("older", "Ретраи", "pay-retry", "2026-11-01");
+    const newer = chat("newer", "Другое", null, "2026-11-04");
+    const task = makeTask({ threadIds: [own.id] });
+    const shells = [own, deleted, older, newer];
+    const projectTitles = new Map([[backend, "backend"]]);
+
+    expect(attachCandidates(shells, { task, query: "", projectTitles, limit: 10 })).toEqual([
+      newer,
+      older,
+    ]);
+    expect(attachCandidates(shells, { task, query: " RETRY ", projectTitles, limit: 10 })).toEqual([
+      older,
+    ]);
+    expect(attachCandidates(shells, { task, query: "back", projectTitles, limit: 1 })).toEqual([
+      newer,
+    ]);
   });
 });

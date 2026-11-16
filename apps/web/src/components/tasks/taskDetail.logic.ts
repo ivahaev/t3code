@@ -1,4 +1,5 @@
 import type {
+  EnvironmentId,
   ProjectId,
   ReviewDiffPreviewInput,
   ReviewDiffPreviewResult,
@@ -6,6 +7,7 @@ import type {
   TaskWorktree,
   ThreadId,
 } from "@t3tools/contracts";
+import { AsyncResult } from "effect/reactivity";
 
 /** The fields of a thread shell that place it on the task page. */
 export interface TaskThreadShell {
@@ -69,8 +71,8 @@ export function groupTaskThreads<T extends TaskThreadShell>(
   });
 }
 
-/** A task worktree whose diff can be read: it still exists on disk where the task recorded it. */
-export function worktreeDiffInputs(worktree: TaskWorktree): {
+/** The two previews of a task worktree that still exists on disk where the task recorded it. */
+function worktreeDiffInputs(worktree: TaskWorktree): {
   readonly branch: ReviewDiffPreviewInput;
   readonly workingTree: ReviewDiffPreviewInput;
 } | null {
@@ -79,6 +81,62 @@ export function worktreeDiffInputs(worktree: TaskWorktree): {
   return {
     branch: { cwd, baseRef: worktree.baseRef, sourceKind: "branch-range" },
     workingTree: { cwd, sourceKind: "working-tree" },
+  };
+}
+
+export interface DiffTarget {
+  readonly environmentId: EnvironmentId;
+  readonly input: ReviewDiffPreviewInput;
+}
+
+/**
+ * The live worktrees of the task and the `review.getDiffPreview` targets they read, two per
+ * worktree in that order. Nothing is read where this connection cannot read files.
+ */
+export function taskDiffTargets(
+  environmentId: EnvironmentId,
+  task: Task,
+  canReadFiles: boolean,
+): { readonly worktrees: TaskWorktree[]; readonly targets: DiffTarget[] } {
+  const worktrees: TaskWorktree[] = [];
+  const targets: DiffTarget[] = [];
+  if (!canReadFiles) return { worktrees, targets };
+  for (const worktree of task.worktrees) {
+    const inputs = worktreeDiffInputs(worktree);
+    if (inputs === null) continue;
+    worktrees.push(worktree);
+    targets.push(
+      { environmentId, input: inputs.branch },
+      { environmentId, input: inputs.workingTree },
+    );
+  }
+  return { worktrees, targets };
+}
+
+export interface WorktreeDiffState {
+  readonly branch: ReviewDiffPreviewResult | null;
+  readonly workingTree: ReviewDiffPreviewResult | null;
+  readonly pending: boolean;
+  /** One line per failed source; the other source still shows. */
+  readonly errors: string[];
+}
+
+/** One worktree's diff state from its two query results. */
+export function worktreeDiffState<E>(
+  branch: AsyncResult.AsyncResult<ReviewDiffPreviewResult, E>,
+  workingTree: AsyncResult.AsyncResult<ReviewDiffPreviewResult, E>,
+  formatError: (failure: AsyncResult.Failure<ReviewDiffPreviewResult, E>) => string,
+): WorktreeDiffState {
+  const errors: string[] = [];
+  if (branch._tag === "Failure") errors.push(`Коммиты ветки: ${formatError(branch)}`);
+  if (workingTree._tag === "Failure") {
+    errors.push(`Незакоммиченные изменения: ${formatError(workingTree)}`);
+  }
+  return {
+    branch: AsyncResult.getOrElse(branch, () => null),
+    workingTree: AsyncResult.getOrElse(workingTree, () => null),
+    pending: [branch, workingTree].some((result) => result.waiting || result._tag === "Initial"),
+    errors,
   };
 }
 
@@ -115,4 +173,63 @@ export function taskErrorCode(error: unknown): TaskErrorCode | null {
     (code === "already_attached" || code === "worktree_preparing" || code === "not_found")
     ? code
     : null;
+}
+
+/**
+ * Why the task cannot start its first chat, or null when it can. The start opens the shared
+ * worktree in the primary project, so that project must be one this client sees.
+ */
+export function taskStartBlocker(
+  task: Task,
+  availableProjectIds: ReadonlySet<ProjectId>,
+): string | null {
+  if (task.archivedAt !== null) return "Задача в архиве.";
+  if (!availableProjectIds.has(task.primaryProjectId)) {
+    return "Основной проект задачи недоступен в этом environment.";
+  }
+  return null;
+}
+
+/** The repository a new chat starts in: the primary one when available, or none at all. */
+export function defaultNewThreadProject(
+  task: Task,
+  availableProjectIds: ReadonlySet<ProjectId>,
+): ProjectId | null {
+  if (availableProjectIds.has(task.primaryProjectId)) return task.primaryProjectId;
+  return task.projectIds.find((projectId) => availableProjectIds.has(projectId)) ?? null;
+}
+
+export interface AttachCandidate {
+  readonly id: ThreadId;
+  readonly projectId: ProjectId;
+  readonly title: string;
+  readonly branch: string | null;
+  readonly updatedAt: string;
+  readonly deletedAt: string | null;
+}
+
+/** Chats that can join the task, matching the query by title, branch or project, newest first. */
+export function attachCandidates<T extends AttachCandidate>(
+  shells: ReadonlyArray<T>,
+  input: {
+    readonly task: Task;
+    readonly query: string;
+    readonly projectTitles: ReadonlyMap<ProjectId, string>;
+    readonly limit: number;
+  },
+): T[] {
+  const needle = input.query.trim().toLocaleLowerCase();
+  const matches = (text: string) => text.toLocaleLowerCase().includes(needle);
+  return shells
+    .filter(
+      (shell) =>
+        shell.deletedAt === null &&
+        !input.task.threadIds.includes(shell.id) &&
+        (needle === "" ||
+          matches(shell.title) ||
+          matches(shell.branch ?? "") ||
+          matches(input.projectTitles.get(shell.projectId) ?? "")),
+    )
+    .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, input.limit);
 }

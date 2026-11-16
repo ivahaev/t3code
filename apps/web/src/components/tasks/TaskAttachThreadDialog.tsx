@@ -19,7 +19,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { toastTaskCommandFailure } from "./taskCommandToast";
-import { taskErrorCode } from "./taskDetail.logic";
+import { attachCandidates, taskErrorCode } from "./taskDetail.logic";
 
 const RESULT_LIMIT = 50;
 
@@ -44,20 +44,10 @@ export function TaskAttachThreadDialog({
       .filter((project) => project.environmentId === environmentId)
       .map((project) => [project.id, project.title]),
   );
-  const needle = query.trim().toLocaleLowerCase();
-  const candidates = useThreadShells()
-    .filter(
-      (shell) =>
-        shell.environmentId === environmentId &&
-        shell.deletedAt === null &&
-        !task.threadIds.includes(shell.id) &&
-        (needle === "" ||
-          shell.title.toLocaleLowerCase().includes(needle) ||
-          (shell.branch ?? "").toLocaleLowerCase().includes(needle) ||
-          (projectTitles.get(shell.projectId) ?? "").toLocaleLowerCase().includes(needle)),
-    )
-    .toSorted((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-    .slice(0, RESULT_LIMIT);
+  const candidates = attachCandidates(
+    useThreadShells().filter((shell) => shell.environmentId === environmentId),
+    { task, query, projectTitles, limit: RESULT_LIMIT },
+  );
 
   const attach = async (threadId: ThreadId) => {
     if (busy || !canAttach) return;

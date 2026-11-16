@@ -28,6 +28,7 @@ import { Radio, RadioGroup } from "../ui/radio-group";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { toastTaskCommandFailure } from "./taskCommandToast";
+import { defaultNewThreadProject } from "./taskDetail.logic";
 import { TaskAgentPicker, useTaskAgentChoice } from "./TaskStartDialog";
 
 type Workspace = TaskNewThreadInput["workspace"];
@@ -63,16 +64,17 @@ export function TaskNewThreadDialog({
   const otherProjects = projects.filter(
     (project) => !task.projectIds.includes(project.id) && project.archivedAt == null,
   );
-  const [projectId, setProjectId] = useState<ProjectId>(
-    taskProjects.some((project) => project.id === task.primaryProjectId)
-      ? task.primaryProjectId
-      : (taskProjects[0]?.id ?? task.primaryProjectId),
+  const [projectId, setProjectId] = useState<ProjectId | null>(() =>
+    defaultNewThreadProject(task, new Set(taskProjects.map((project) => project.id))),
   );
   const [addingProject, setAddingProject] = useState(false);
   const [workspace, setWorkspace] = useState<Workspace>("shared");
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
-  const { selection, runtimeMode, picker } = useTaskAgentChoice(environmentId, projectId);
+  const { selection, runtimeMode, picker } = useTaskAgentChoice(
+    environmentId,
+    projectId ?? task.primaryProjectId,
+  );
   const canCreate = useAtomValue(tasksEnvironment.newTaskThread.permissionAtom(environmentId));
   const newTaskThread = useAtomCommand(tasksEnvironment.newTaskThread, {
     label: "task new thread",
@@ -80,7 +82,7 @@ export function TaskNewThreadDialog({
   const addTaskProject = useAtomCommand(tasksEnvironment.addTaskProject, {
     label: "task add project",
   });
-  const valid = text.trim().length > 0 && selection !== null;
+  const valid = projectId !== null && text.trim().length > 0 && selection !== null;
 
   const addProject = async (next: ProjectId) => {
     setBusy(true);
@@ -92,7 +94,7 @@ export function TaskNewThreadDialog({
   };
 
   const submit = async () => {
-    if (!valid || busy || !canCreate) return;
+    if (!valid || projectId === null || busy || !canCreate) return;
     setBusy(true);
     const result = await newTaskThread({
       environmentId,
@@ -144,7 +146,8 @@ export function TaskNewThreadDialog({
                 >
                   <SelectTrigger id="task-thread-project" size="sm" disabled={busy}>
                     <SelectValue>
-                      {projects.find((project) => project.id === projectId)?.title ?? projectId}
+                      {projects.find((project) => project.id === projectId)?.title ??
+                        "Выберите репозиторий"}
                     </SelectValue>
                   </SelectTrigger>
                   <SelectPopup>

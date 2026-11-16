@@ -1,9 +1,5 @@
 import type { CodeViewDiffItem } from "@pierre/diffs";
-import type {
-  ReviewDiffPreviewResult,
-  ReviewDiffPreviewSource,
-  TaskWorktree,
-} from "@t3tools/contracts";
+import type { ReviewDiffPreviewSource, TaskWorktree } from "@t3tools/contracts";
 
 import { useClientSettings } from "~/hooks/useSettings";
 import { useRenderedAppearance } from "~/hooks/useTheme";
@@ -17,17 +13,13 @@ import { PREFERRED_HIGHLIGHTER } from "~/lib/syntaxHighlighting";
 import { DiffStatLabel } from "../chat/DiffStatLabel";
 import { StyledDiffCodeView } from "../diffs/StyledDiffCodeView";
 import { Badge } from "../ui/badge";
-import { worktreeDiffStat } from "./taskDetail.logic";
+import { worktreeDiffStat, type WorktreeDiffState } from "./taskDetail.logic";
 
 /** One task worktree with its two previews: commits since the base, then uncommitted work. */
-export interface TaskWorktreeDiff {
+export interface TaskWorktreeDiff extends WorktreeDiffState {
   readonly key: string;
   readonly projectTitle: string;
   readonly worktree: TaskWorktree;
-  readonly branch: ReviewDiffPreviewResult | null;
-  readonly workingTree: ReviewDiffPreviewResult | null;
-  readonly pending: boolean;
-  readonly error: string | null;
 }
 
 // The task page re-renders on every chat update; a source's patch is parsed once per theme.
@@ -52,12 +44,20 @@ interface FileLabel {
 }
 
 /** The task's code: every live worktree's changes in one diff view, repository by repository. */
-export function TaskCodeTab({ diffs }: { readonly diffs: ReadonlyArray<TaskWorktreeDiff> }) {
+export function TaskCodeTab({
+  diffs,
+  unavailable,
+}: {
+  readonly diffs: ReadonlyArray<TaskWorktreeDiff>;
+  /** Why this connection shows no diffs, such as missing file access. */
+  readonly unavailable: string | null;
+}) {
   const resolvedTheme = useRenderedAppearance();
   const diffLayout = useClientSettings((settings) => settings.diffLayout);
   const labels = new Map<string, FileLabel>();
   const items: CodeViewDiffItem<undefined>[] = [];
   const truncated: string[] = [];
+  const unparsed: string[] = [];
   for (const diff of diffs) {
     const sources = [diff.branch, diff.workingTree].flatMap(
       (preview): ReviewDiffPreviewSource[] => preview?.sources.slice() ?? [],
@@ -65,7 +65,16 @@ export function TaskCodeTab({ diffs }: { readonly diffs: ReadonlyArray<TaskWorkt
     for (const source of sources) {
       if (source.truncated) truncated.push(`${diff.projectTitle} · ${diff.worktree.branch}`);
       const patch = parseSource(source, `task-code:${diff.key}:${resolvedTheme}`);
-      if (patch?.kind !== "files") continue;
+      if (patch?.kind !== "files") {
+        // An unreadable patch is named instead of vanishing from the list.
+        if (patch !== null) {
+          const files = source.files?.length;
+          unparsed.push(
+            `${diff.projectTitle} · ${diff.worktree.branch}${files ? ` (${files} файл.)` : ""}`,
+          );
+        }
+        continue;
+      }
       for (const { fileDiff, fileKey, fileVersion } of buildFileDiffEntries(patch.files)) {
         const id = `${diff.key}\n${source.kind}\n${fileKey}`;
         labels.set(id, {
@@ -88,20 +97,21 @@ export function TaskCodeTab({ diffs }: { readonly diffs: ReadonlyArray<TaskWorkt
             <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
               {diff.worktree.branch}
             </span>
-            {diff.error !== null ? (
-              <span className="min-w-0 truncate text-xs text-destructive-foreground">
-                {diff.error}
+            {diff.errors.map((error) => (
+              <span key={error} className="min-w-0 truncate text-xs text-destructive-foreground">
+                {error}
               </span>
-            ) : stat === null ? (
-              <span className="text-xs text-muted-foreground">загрузка…</span>
-            ) : (
+            ))}
+            {stat !== null ? (
               <DiffStatLabel
                 additions={stat.additions}
                 deletions={stat.deletions}
                 layout="inline"
                 className="ms-auto text-xs"
               />
-            )}
+            ) : diff.errors.length === 0 ? (
+              <span className="text-xs text-muted-foreground">загрузка…</span>
+            ) : null}
           </div>
         );
       })}
@@ -110,9 +120,21 @@ export function TaskCodeTab({ diffs }: { readonly diffs: ReadonlyArray<TaskWorkt
           Дифф слишком большой и показан не полностью: {[...new Set(truncated)].join(", ")}
         </p>
       ) : null}
+      {unparsed.length > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Не удалось показать дифф: {unparsed.join(", ")}
+        </p>
+      ) : null}
     </div>
   );
 
+  if (unavailable !== null) {
+    return (
+      <p className="px-(--workspace-gutter-start) py-6 text-sm text-muted-foreground">
+        {unavailable}
+      </p>
+    );
+  }
   if (diffs.length === 0) {
     return (
       <p className="px-(--workspace-gutter-start) py-6 text-sm text-muted-foreground">
@@ -120,7 +142,7 @@ export function TaskCodeTab({ diffs }: { readonly diffs: ReadonlyArray<TaskWorkt
       </p>
     );
   }
-  const loaded = diffs.every((diff) => !diff.pending || diff.error !== null);
+  const loaded = diffs.every((diff) => !diff.pending);
   if (items.length === 0) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">

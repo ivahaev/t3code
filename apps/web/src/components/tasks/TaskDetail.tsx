@@ -11,7 +11,14 @@ import type {
 } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { LinkIcon, MoreHorizontalIcon, PencilIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
+import {
+  ArchiveRestoreIcon,
+  LinkIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
+  PlusIcon,
+  RefreshCwIcon,
+} from "lucide-react";
 import { useContext, useState } from "react";
 
 import { isElectron } from "~/env";
@@ -19,6 +26,7 @@ import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { cn } from "~/lib/utils";
 import { providerInstanceEntriesFor, type ProviderInstanceEntry } from "~/providerInstances";
 import { useProjects, useThreadShells } from "~/state/entities";
+import { useFilesystemReadAccess } from "~/state/filesystem";
 import { formatEnvironmentQueryError } from "~/state/query";
 import { reviewEnvironment } from "~/state/review";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "~/state/server";
@@ -29,6 +37,7 @@ import { useUiStateStore } from "~/uiStateStore";
 import { DiffStatLabel } from "../chat/DiffStatLabel";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { resolveThreadLastVisitedAt, resolveThreadStatusPill } from "../Sidebar.logic";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
@@ -45,10 +54,12 @@ import { TaskAttachThreadDialog } from "./TaskAttachThreadDialog";
 import { taskAttention, taskAttentionLabel } from "./taskAttention.logic";
 import { TASK_STATUS_LABEL, TASK_STATUSES } from "./taskBoard.logic";
 import { TaskCodeTab, type TaskWorktreeDiff } from "./TaskCodeTab";
-import { toastTaskCommandFailure } from "./taskCommandToast";
+import { toastTaskCommandFailure, toastTaskStartBlocked } from "./taskCommandToast";
 import {
   groupTaskThreads,
-  worktreeDiffInputs,
+  taskDiffTargets,
+  taskStartBlocker,
+  worktreeDiffState,
   worktreeDiffStat,
   type DiffStat,
   type TaskThreadGroup,
@@ -139,7 +150,10 @@ function TaskDetailBody({
         localLastVisitedAtById[scopedThreadKey(scopeThreadRef(environmentId, shell.id))],
       ),
     }));
-  const groups = groupTaskThreads(task, shells, new Set(projects.map((project) => project.id)));
+  const availableProjectIds = new Set(projects.map((project) => project.id));
+  const groups = groupTaskThreads(task, shells, availableProjectIds);
+  const archived = task.archivedAt !== null;
+  const startBlocker = taskStartBlocker(task, availableProjectIds);
   const attention = taskAttentionLabel(
     taskAttention(shells.filter((shell) => task.threadIds.includes(shell.id))),
   );
@@ -151,29 +165,26 @@ function TaskDetailBody({
     providerInstanceEntriesFor(providers, settings, null).map((entry) => [entry.instanceId, entry]),
   );
 
-  const liveWorktrees = task.worktrees.flatMap((worktree) => {
-    const inputs = worktreeDiffInputs(worktree);
-    return inputs ? [{ worktree, inputs }] : [];
-  });
-  const diffTargets = liveWorktrees.flatMap(({ inputs }): DiffTarget[] => [
-    { environmentId, input: inputs.branch },
-    { environmentId, input: inputs.workingTree },
-  ]);
+  const fileAccess = useFilesystemReadAccess(environmentId);
+  const { worktrees: liveWorktrees, targets: diffTargets } = taskDiffTargets(
+    environmentId,
+    task,
+    fileAccess.canReadFiles,
+  );
   const previews = useAtomValue(taskDiffPreviewsAtom(JSON.stringify(diffTargets)));
-  const diffs: TaskWorktreeDiff[] = liveWorktrees.map(({ worktree }, index) => {
-    const branch = previews[index * 2]!;
-    const workingTree = previews[index * 2 + 1]!;
-    const failure = [branch, workingTree].find((result) => result._tag === "Failure");
-    return {
-      key: worktreeKey(worktree),
-      projectTitle: projectTitle(worktree.projectId),
-      worktree,
-      branch: AsyncResult.getOrElse(branch, () => null),
-      workingTree: AsyncResult.getOrElse(workingTree, () => null),
-      pending: branch.waiting || workingTree.waiting || branch._tag === "Initial",
-      error: failure?._tag === "Failure" ? formatEnvironmentQueryError(failure.cause) : null,
-    };
-  });
+  const diffs: TaskWorktreeDiff[] = liveWorktrees.map((worktree, index) => ({
+    key: worktreeKey(worktree),
+    projectTitle: projectTitle(worktree.projectId),
+    worktree,
+    ...worktreeDiffState(previews[index * 2]!, previews[index * 2 + 1]!, (failure) =>
+      formatEnvironmentQueryError(failure.cause),
+    ),
+  }));
+  const diffsUnavailable = fileAccess.canReadFiles
+    ? null
+    : fileAccess.isPending
+      ? "Проверяем доступ к файлам…"
+      : (fileAccess.error ?? "Это подключение не может читать локальные диффы.");
   const statByWorktree = new Map(
     diffs.map((diff) => [diff.key, worktreeDiffStat([diff.branch, diff.workingTree])]),
   );
@@ -188,11 +199,15 @@ function TaskDetailBody({
   const detachTaskThread = useAtomCommand(tasksEnvironment.detachTaskThread, {
     label: "task detach thread",
   });
+  const unarchiveTask = useAtomCommand(tasksEnvironment.unarchiveTask, {
+    label: "task unarchive",
+  });
   const changeStatus = async (status: TaskStatus) => {
     if (status === task.status) return;
     // The same rule as the board: a task without chats starts through the dialog.
     if (task.status === "backlog" && status === "in_progress" && task.threadIds.length === 0) {
-      setDialog("start");
+      if (startBlocker === null) setDialog("start");
+      else toastTaskStartBlocked(startBlocker);
       return;
     }
     const result =
@@ -216,7 +231,12 @@ function TaskDetailBody({
               if (next !== null) void changeStatus(next as TaskStatus);
             }}
           >
-            <SelectTrigger size="sm" aria-label="Статус" className="w-auto" disabled={!canEdit}>
+            <SelectTrigger
+              size="sm"
+              aria-label="Статус"
+              className="w-auto"
+              disabled={!canEdit || archived}
+            >
               <SelectValue>{TASK_STATUS_LABEL[task.status]}</SelectValue>
             </SelectTrigger>
             <SelectPopup>
@@ -227,22 +247,38 @@ function TaskDetailBody({
               ))}
             </SelectPopup>
           </Select>
+          {archived ? (
+            <Badge variant="outline" size="sm">
+              В архиве
+            </Badge>
+          ) : null}
           {attention ? (
             <span className="text-xs text-muted-foreground">
               {attention.glyph} {attention.text}
             </span>
           ) : null}
           {task.link ? <TaskLink link={task.link} /> : null}
-          <Button
-            size="sm"
-            variant="ghost"
-            className="ms-auto"
-            disabled={!canEdit}
-            onClick={() => setDialog("edit")}
-          >
-            <PencilIcon />
-            Изменить
-          </Button>
+          <div className="min-w-0 flex-1" />
+          {archived ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!canEdit}
+              onClick={() =>
+                void unarchiveTask({ environmentId, input: { id: task.id } }).then((result) =>
+                  toastTaskCommandFailure("Не удалось вернуть задачу из архива", result),
+                )
+              }
+            >
+              <ArchiveRestoreIcon />
+              Вернуть из архива
+            </Button>
+          ) : (
+            <Button size="sm" variant="ghost" disabled={!canEdit} onClick={() => setDialog("edit")}>
+              <PencilIcon />
+              Изменить
+            </Button>
+          )}
         </div>
         {task.description.trim() !== "" ? (
           <p className="max-h-40 overflow-y-auto text-sm whitespace-pre-wrap text-muted-foreground">
@@ -250,14 +286,14 @@ function TaskDetailBody({
           </p>
         ) : null}
         <div className="flex flex-wrap items-center gap-2">
-          <Button size="sm" disabled={!canEdit} onClick={() => setDialog("new-thread")}>
+          <Button size="sm" disabled={!canEdit || archived} onClick={() => setDialog("new-thread")}>
             <PlusIcon />
             Новый чат
           </Button>
           <Button
             size="sm"
             variant="outline"
-            disabled={!canEdit}
+            disabled={!canEdit || archived}
             onClick={() => setDialog("attach")}
           >
             <LinkIcon />
@@ -299,13 +335,13 @@ function TaskDetailBody({
               title={projectTitle(group.projectId)}
               statByWorktree={statByWorktree}
               providerEntries={providerEntries}
-              canEdit={canEdit}
+              canEdit={canEdit && !archived}
               onDetach={(threadId) => void detach(threadId)}
             />
           ))}
         </div>
       ) : (
-        <TaskCodeTab diffs={diffs} />
+        <TaskCodeTab diffs={diffs} unavailable={diffsUnavailable} />
       )}
 
       {dialog === "edit" ? (
