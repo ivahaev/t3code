@@ -5,6 +5,9 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { taskErrorCode } from "./taskDetail.logic";
+
+const WORKTREE_PREPARING_MESSAGE = "Worktree задачи ещё готовится, попробуйте через минуту";
 
 /** Shows a failed task command; the server's `TaskError` messages are written for the user. */
 export function toastTaskCommandFailure(
@@ -18,7 +21,12 @@ export function toastTaskCommandFailure(
     stackedThreadToast({
       type: "error",
       title,
-      description: error instanceof Error ? error.message : String(error),
+      description:
+        taskErrorCode(error) === "worktree_preparing"
+          ? WORKTREE_PREPARING_MESSAGE
+          : error instanceof Error
+            ? error.message
+            : String(error),
     }),
   );
   return true;

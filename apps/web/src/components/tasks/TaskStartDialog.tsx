@@ -6,6 +6,7 @@ import {
   ProviderInstanceId,
   type EnvironmentId,
   type ModelSelection,
+  type ProjectId,
   type Task,
 } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
@@ -36,6 +37,75 @@ import {
 import { Label } from "../ui/label";
 import { toastTaskCommandFailure } from "./taskCommandToast";
 
+/** The agent, model and runtime mode a task chat starts with: the project's defaults until picked. */
+export function useTaskAgentChoice(environmentId: EnvironmentId, projectId: ProjectId) {
+  const [picked, setPicked] = useState<ModelSelection | null>(null);
+  const project =
+    useProjects().find(
+      (entry) => entry.environmentId === environmentId && entry.id === projectId,
+    ) ?? null;
+  const settings = useEnvironmentSettings(environmentId);
+  const providers =
+    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
+  const managedPolicy = useManagedPolicy(environmentId);
+  const instanceEntries = providerInstanceEntriesFor(providers, settings, projectId);
+  const selection =
+    picked !== null && instanceEntries.some((entry) => entry.instanceId === picked.instanceId)
+      ? picked
+      : scheduledTaskDefaultModel(settings, project, instanceEntries);
+  const instanceId =
+    selection?.instanceId ?? instanceEntries[0]?.instanceId ?? ProviderInstanceId.make("");
+  const model = selection?.model ?? "";
+  const defaultRuntimeMode = resolveProjectSettings(settings, projectId, project).settings
+    .defaultRuntimeMode;
+  return {
+    project,
+    selection,
+    runtimeMode: clampManagedRuntimeMode(managedPolicy, defaultRuntimeMode) ?? defaultRuntimeMode,
+    picker: {
+      instanceId,
+      model,
+      instanceEntries,
+      modelOptionsByInstance: getCustomModelOptionsByInstance(
+        settings,
+        providers,
+        instanceId,
+        model,
+      ),
+      onPick: setPicked,
+    },
+  };
+}
+
+export function TaskAgentPicker({
+  environmentId,
+  disabled,
+  picker,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly disabled: boolean;
+  readonly picker: ReturnType<typeof useTaskAgentChoice>["picker"];
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Label>Агент и модель</Label>
+      <ProviderModelPicker
+        environmentId={environmentId}
+        disabled={disabled}
+        activeInstanceId={picker.instanceId}
+        model={picker.model}
+        lockedProvider={null}
+        instanceEntries={picker.instanceEntries}
+        modelOptionsByInstance={picker.modelOptionsByInstance}
+        isComposerOwned={false}
+        onInstanceModelChange={(nextInstanceId, nextModel) =>
+          picker.onPick({ instanceId: nextInstanceId, model: nextModel })
+        }
+      />
+    </div>
+  );
+}
+
 /** Starts a backlog task: the server opens its worktree and first chat with the chosen agent. */
 export function TaskStartDialog({
   environmentId,
@@ -47,34 +117,12 @@ export function TaskStartDialog({
   readonly onClose: () => void;
 }) {
   const [starting, setStarting] = useState(false);
-  const [picked, setPicked] = useState<ModelSelection | null>(null);
-  const project =
-    useProjects().find(
-      (entry) => entry.environmentId === environmentId && entry.id === task.primaryProjectId,
-    ) ?? null;
-  const settings = useEnvironmentSettings(environmentId);
-  const providers =
-    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
-  const managedPolicy = useManagedPolicy(environmentId);
+  const { project, selection, runtimeMode, picker } = useTaskAgentChoice(
+    environmentId,
+    task.primaryProjectId,
+  );
   const canStart = useAtomValue(tasksEnvironment.startTask.permissionAtom(environmentId));
   const startTask = useAtomCommand(tasksEnvironment.startTask, { label: "task start" });
-  const instanceEntries = providerInstanceEntriesFor(providers, settings, task.primaryProjectId);
-  // The project's default agent and model until the user picks another.
-  const selection =
-    picked !== null && instanceEntries.some((entry) => entry.instanceId === picked.instanceId)
-      ? picked
-      : scheduledTaskDefaultModel(settings, project, instanceEntries);
-  const instanceId =
-    selection?.instanceId ?? instanceEntries[0]?.instanceId ?? ProviderInstanceId.make("");
-  const model = selection?.model ?? "";
-  const modelOptionsByInstance = getCustomModelOptionsByInstance(
-    settings,
-    providers,
-    instanceId,
-    model,
-  );
-  const defaultRuntimeMode = resolveProjectSettings(settings, task.primaryProjectId, project)
-    .settings.defaultRuntimeMode;
 
   const start = async () => {
     if (starting || selection === null || !canStart) return;
@@ -85,8 +133,7 @@ export function TaskStartDialog({
         id: task.id,
         commandId: CommandId.make(randomUUID()),
         modelSelection: selection,
-        runtimeMode:
-          clampManagedRuntimeMode(managedPolicy, defaultRuntimeMode) ?? defaultRuntimeMode,
+        runtimeMode,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
       },
     });
@@ -111,22 +158,7 @@ export function TaskStartDialog({
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
-          <div className="flex flex-col gap-1.5">
-            <Label>Агент и модель</Label>
-            <ProviderModelPicker
-              environmentId={environmentId}
-              disabled={starting}
-              activeInstanceId={instanceId}
-              model={model}
-              lockedProvider={null}
-              instanceEntries={instanceEntries}
-              modelOptionsByInstance={modelOptionsByInstance}
-              isComposerOwned={false}
-              onInstanceModelChange={(nextInstanceId, nextModel) =>
-                setPicked({ instanceId: nextInstanceId, model: nextModel })
-              }
-            />
-          </div>
+          <TaskAgentPicker environmentId={environmentId} disabled={starting} picker={picker} />
         </DialogPanel>
         <DialogFooter>
           <DialogClose render={<Button variant="ghost" size="sm" disabled={starting} />}>

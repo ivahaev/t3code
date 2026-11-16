@@ -171,6 +171,7 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
     if (status === task.status) return;
     // A task without chats starts through the dialog; one that already has chats only moves.
     if (task.status === "backlog" && status === "in_progress" && task.threadIds.length === 0) {
+      setKeyboardMovedKey(null);
       setStarting(entry);
       return;
     }
@@ -178,7 +179,8 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
       status === "done"
         ? await moveTaskToDone({ environmentId, task, deps: { setTaskStatus } })
         : await setTaskStatus({ environmentId, input: { id: task.id, status } });
-    toastTaskCommandFailure("Не удалось перенести задачу", result);
+    // A card that stays in its column keeps its focus; nothing remounts to take it back.
+    if (toastTaskCommandFailure("Не удалось перенести задачу", result)) setKeyboardMovedKey(null);
   };
   const remove = async ({ environmentId, task }: BoardTask) => {
     const message = `Удалить задачу «${task.title}»?\nЧаты, worktree и ветки останутся.`;
@@ -194,6 +196,7 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
       setKeyboardMovedKey(boardTaskKey(entry));
       void move(entry, status);
     },
+    onRefocused: () => setKeyboardMovedKey(null),
     onEdit: (entry) => setEditor({ environmentId: entry.environmentId, task: entry.task }),
     onArchive: ({ environmentId, task }) =>
       void archiveTask({ environmentId, input: { id: task.id } }).then((result) =>

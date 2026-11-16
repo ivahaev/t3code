@@ -127,4 +127,28 @@ describe("TaskBoard", () => {
       input: { id: TaskId.make("task:pay"), status: "review" },
     });
   });
+
+  it("moves a focused card with the bracket keys by their physical position", async () => {
+    setup();
+    await using screen = await render(
+      <RegistryContext.Provider value={appAtomRegistry}>
+        <TaskBoard search={{}} />
+      </RegistryContext.Provider>,
+    );
+
+    const card = screen.getByRole("article", { name: "Оплата картой" });
+    await expect.element(card).toBeVisible();
+    (card.element() as HTMLElement).focus();
+    // A Russian layout types "Ъ" on this key; the shortcut follows the key, not the letter.
+    card
+      .element()
+      .dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ъ", code: "BracketRight", bubbles: true }),
+      );
+
+    expect(state.command).toHaveBeenCalledWith("set-status", {
+      environmentId,
+      input: { id: TaskId.make("task:pay"), status: "review" },
+    });
+  });
 });

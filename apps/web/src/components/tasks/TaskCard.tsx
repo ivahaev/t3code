@@ -1,5 +1,6 @@
 import { useDraggable } from "@dnd-kit/core";
 import type { TaskStatus } from "@t3tools/contracts";
+import { Link } from "@tanstack/react-router";
 import { MoreHorizontalIcon, PlayIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
@@ -25,6 +26,8 @@ const ATTENTION_CLASS_NAME = {
 export interface TaskCardActions {
   readonly onMove: (entry: BoardTask, status: TaskStatus) => void;
   readonly onKeyboardMove: (entry: BoardTask, status: TaskStatus) => void;
+  /** The card the keyboard moved has its focus back; later remounts must not take it again. */
+  readonly onRefocused: () => void;
   readonly onEdit: (entry: BoardTask) => void;
   readonly onArchive: (entry: BoardTask) => void;
   readonly onUnarchive: (entry: BoardTask) => void;
@@ -64,7 +67,10 @@ export function TaskCard({
       ref={(node) => {
         setNodeRef(node);
         // Focus returns only while it is lost with the remount, never taken from elsewhere.
-        if (refocus && node !== null && document.activeElement === document.body) node.focus();
+        if (refocus && node !== null && document.activeElement === document.body) {
+          node.focus();
+          actions.onRefocused();
+        }
       }}
       {...listeners}
       tabIndex={0}
@@ -74,9 +80,10 @@ export function TaskCard({
       onKeyDown={(event) => {
         // Only the focused card itself: its buttons and menu keep their own keys.
         if (event.target !== event.currentTarget || !canEdit || archived) return;
-        if (event.key === "[" || event.key === "]") {
+        // Physical keys, so the shortcut also works on layouts where they type other letters.
+        if (event.code === "BracketLeft" || event.code === "BracketRight") {
           event.preventDefault();
-          moveBy(event.key === "[" ? -1 : 1);
+          moveBy(event.code === "BracketLeft" ? -1 : 1);
         }
       }}
       className={cn(
@@ -86,8 +93,15 @@ export function TaskCard({
       )}
     >
       <div className="flex items-start gap-1">
-        {/* Task 8 turns the title into the link to the task page. */}
-        <h3 className="min-w-0 flex-1 text-sm font-medium break-words">{task.title}</h3>
+        <h3 className="min-w-0 flex-1 text-sm font-medium break-words">
+          <Link
+            to="/tasks/$environmentId/$taskId"
+            params={{ environmentId: entry.environmentId, taskId: task.id }}
+            className="hover:underline focus-visible:underline focus-visible:outline-none"
+          >
+            {task.title}
+          </Link>
+        </h3>
         <TaskCardMenu entry={entry} canEdit={canEdit} actions={actions} />
       </div>
       {projectNames.length > 0 ? (

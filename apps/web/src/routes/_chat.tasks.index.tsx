@@ -3,7 +3,7 @@ import { createFileRoute } from "@tanstack/react-router";
 
 import { TaskBoard, type TasksSearch } from "../components/tasks/TaskBoard";
 
-export const Route = createFileRoute("/_chat/tasks")({
+export const Route = createFileRoute("/_chat/tasks/")({
   validateSearch: (raw: Record<string, unknown>): TasksSearch => ({
     ...(raw.archived === 1 || raw.archived === "1" ? { archived: 1 as const } : {}),
     ...(typeof raw.environment === "string" && raw.environment
