@@ -9,7 +9,10 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   SecretProviderId,
+  TaskError,
+  TaskId,
   ThreadId,
+  type AuthEnvironmentScope,
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   AuthSourceControlWriteScope,
@@ -341,6 +344,44 @@ it.effect("requires task permission before attaching a prepared worktree to a th
       }).pipe(Effect.flip),
     ).toMatchObject({ requiredPermission: AuthOrchestrationOperateScope });
     expect(handled).toBe(false);
+  }),
+);
+
+it.effect("task cleanup needs source control and operate, the cleanup mode needs settings", () =>
+  Effect.gen(function* () {
+    const kept = new Set<string>([WS_METHODS.tasksCleanup, WS_METHODS.tasksSetCleanupMode]);
+    const group = WsRpcGroup.omit(
+      ...[...WsRpcGroup.requests.keys()].filter(
+        (
+          tag,
+        ): tag is Exclude<
+          keyof typeof RPC_REQUIRED_SCOPES,
+          typeof WS_METHODS.tasksCleanup | typeof WS_METHODS.tasksSetCleanupMode
+        > => !kept.has(tag),
+      ),
+    );
+    // An authorized call reaches the handler, which fails in a way no assertion expects.
+    const reached = Effect.fail(new TaskError({ message: "reached the handler" }));
+    const handlers = Layer.mergeAll(
+      group.toLayerHandler(WS_METHODS.tasksCleanup, () => reached),
+      group.toLayerHandler(WS_METHODS.tasksSetCleanupMode, () => reached),
+    );
+    const clientWith = (scopes: ReadonlyArray<AuthEnvironmentScope>) =>
+      RpcTest.makeClient(group).pipe(
+        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer(scopes))),
+      );
+    const cleanup = { id: TaskId.make("task:a"), worktrees: [], branches: [] };
+    const operateOnly = yield* clientWith([AuthOrchestrationOperateScope]);
+    expect(yield* operateOnly[WS_METHODS.tasksCleanup](cleanup).pipe(Effect.flip)).toMatchObject({
+      requiredPermission: AuthSourceControlWriteScope,
+    });
+    expect(
+      yield* operateOnly[WS_METHODS.tasksSetCleanupMode]({ mode: "always" }).pipe(Effect.flip),
+    ).toMatchObject({ requiredPermission: AuthSettingsWriteScope });
+    const sourceControlOnly = yield* clientWith([AuthSourceControlWriteScope]);
+    expect(
+      yield* sourceControlOnly[WS_METHODS.tasksCleanup](cleanup).pipe(Effect.flip),
+    ).toMatchObject({ requiredPermission: AuthOrchestrationOperateScope });
   }),
 );
 

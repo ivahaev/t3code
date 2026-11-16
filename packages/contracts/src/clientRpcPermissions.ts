@@ -75,8 +75,11 @@ export const CLIENT_GUARDED_RPC_SCOPES = {
   [WS_METHODS.tasksDetachThread]: AuthOrchestrationOperateScope,
   [WS_METHODS.tasksAddProject]: AuthOrchestrationOperateScope,
   [WS_METHODS.tasksCleanupPreview]: AuthOrchestrationOperateScope,
-  [WS_METHODS.tasksCleanup]: AuthOrchestrationOperateScope,
-  [WS_METHODS.tasksSetCleanupMode]: AuthOrchestrationOperateScope,
+  // Removes worktrees and deletes branches, as the git commands above do; operate is also
+  // checked, in clientRpcRequiredScopes.
+  [WS_METHODS.tasksCleanup]: AuthSourceControlWriteScope,
+  // An environment-wide preference, like the other settings.
+  [WS_METHODS.tasksSetCleanupMode]: AuthSettingsWriteScope,
   [WS_METHODS.scheduledTasksUpsert]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksSetEnabled]: AuthOrchestrationOperateScope,
   [WS_METHODS.scheduledTasksDelete]: AuthOrchestrationOperateScope,
@@ -105,6 +108,9 @@ export function clientRpcRequiredScopes(
     const payload = decodePrepareThread(input);
     if (payload.mode === "worktree" && payload.threadId !== undefined)
       return [AuthSourceControlWriteScope, AuthOrchestrationOperateScope];
+  }
+  if (method === WS_METHODS.tasksCleanup) {
+    return [AuthSourceControlWriteScope, AuthOrchestrationOperateScope];
   }
   if (method === WS_METHODS.gitRunStackedAction && input !== undefined) {
     const payload = decodeStackedAction(input);

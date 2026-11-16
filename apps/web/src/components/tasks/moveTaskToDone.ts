@@ -55,6 +55,8 @@ export async function moveTaskToDone(input: {
   readonly environmentId: EnvironmentId;
   readonly task: Task;
   readonly cleanupMode: TaskCleanupMode;
+  /** False when this connection may not remove worktrees and branches, so nothing is offered. */
+  readonly canCleanup: boolean;
   readonly deps: MoveTaskToDoneDeps;
 }): Promise<AtomCommandResult<TaskMutationResult, unknown>> {
   const { environmentId, task, cleanupMode, deps } = input;
@@ -62,7 +64,7 @@ export async function moveTaskToDone(input: {
     environmentId,
     input: { id: task.id, status: "done" },
   });
-  if (moved._tag !== "Success" || cleanupMode === "never") return moved;
+  if (moved._tag !== "Success" || cleanupMode === "never" || !input.canCleanup) return moved;
 
   const preview = await deps.previewTaskCleanup({ environmentId, input: { id: task.id } });
   if (toastTaskCommandFailure("Не удалось проверить worktree задачи", preview)) return moved;

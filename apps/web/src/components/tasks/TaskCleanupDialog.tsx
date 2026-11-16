@@ -1,4 +1,4 @@
-import { RegistryContext } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ProjectId, Task } from "@t3tools/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { useContext, useState, type ReactNode } from "react";
@@ -58,6 +58,8 @@ export function useMoveTaskToDone(): {
           registry.get(tasksEnvironment.tasksLive({ environmentId, input: {} })),
           () => null,
         )?.settings.cleanupMode ?? "ask",
+      // The caller's page keeps this environment's session mounted for its own permissions.
+      canCleanup: registry.get(tasksEnvironment.cleanupTask.permissionAtom(environmentId)),
       deps: { setTaskStatus, previewTaskCleanup, cleanupTask, openCleanupDialog: setRequest },
     });
   return {
@@ -89,7 +91,7 @@ function TaskCleanupDialog({
   readonly request: TaskCleanupRequest;
   readonly onClose: () => void;
 }) {
-  const { environmentId, task, preview, offerAlways } = request;
+  const { environmentId, task, preview } = request;
   const [selection, setSelection] = useState(() => initialCleanupSelection(preview));
   const [always, setAlways] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -97,6 +99,10 @@ function TaskCleanupDialog({
   const setTaskCleanupMode = useAtomCommand(tasksEnvironment.setTaskCleanupMode, {
     label: "task set cleanup mode",
   });
+  const canSetMode = useAtomValue(
+    tasksEnvironment.setTaskCleanupMode.permissionAtom(environmentId),
+  );
+  const offerAlways = request.offerAlways && canSetMode;
   const projects = useProjects().filter((project) => project.environmentId === environmentId);
   const projectTitle = (projectId: ProjectId) =>
     projects.find((project) => project.id === projectId)?.title ?? projectId;

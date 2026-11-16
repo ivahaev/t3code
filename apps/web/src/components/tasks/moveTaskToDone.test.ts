@@ -62,8 +62,8 @@ function setup(statusFails = false) {
     ),
     openCleanupDialog: vi.fn<MoveTaskToDoneDeps["openCleanupDialog"]>(),
   };
-  const run = (cleanupMode: TaskCleanupMode) =>
-    moveTaskToDone({ environmentId, task, cleanupMode, deps });
+  const run = (cleanupMode: TaskCleanupMode, canCleanup = true) =>
+    moveTaskToDone({ environmentId, task, cleanupMode, canCleanup, deps });
   return { deps, run };
 }
 
@@ -76,6 +76,14 @@ describe("moveTaskToDone", () => {
       input: { id: task.id, status: "done" },
     });
     expect(deps.previewTaskCleanup).not.toHaveBeenCalled();
+  });
+
+  it("offers no cleanup to a connection that may not remove worktrees", async () => {
+    const { deps, run } = setup();
+    expect((await run("always", false))._tag).toBe("Success");
+    expect(deps.previewTaskCleanup).not.toHaveBeenCalled();
+    expect(deps.cleanupTask).not.toHaveBeenCalled();
+    expect(deps.openCleanupDialog).not.toHaveBeenCalled();
   });
 
   it("checks nothing when the move fails", async () => {

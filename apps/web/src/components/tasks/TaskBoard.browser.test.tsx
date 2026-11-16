@@ -37,6 +37,7 @@ vi.mock(import("~/state/tasks"), async () => {
       startTask: command("start"),
       previewTaskCleanup: command("cleanup-preview"),
       cleanupTask: command("cleanup"),
+      setTaskCleanupMode: command("set-cleanup-mode"),
     } as never,
   };
 });
