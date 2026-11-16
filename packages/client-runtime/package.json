@@ -411,6 +411,10 @@
       "types": "./src/state/turnItemPresentation.ts",
       "default": "./src/state/turnItemPresentation.ts"
     },
+    "./state/tasks": {
+      "types": "./src/state/tasks.ts",
+      "default": "./src/state/tasks.ts"
+    },
     "./state/vcs": {
       "types": "./src/state/vcs.ts",
       "default": "./src/state/vcs.ts"
