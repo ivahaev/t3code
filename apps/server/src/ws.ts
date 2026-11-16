@@ -125,6 +125,7 @@ import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts"
 import * as ThreadMessageIntake from "./orchestration-v2/ThreadMessageIntake.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
+import * as TaskService from "./tasks/TaskService.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as GuestShareService from "./guest/GuestShareService.ts";
 import {
@@ -1471,6 +1472,7 @@ export const layerWsRpc = (
       const commandOutputHub = yield* CommandOutputHub.CommandOutputHub;
       const providerSessionManager = yield* ProviderSessionManager.ProviderSessionManagerV2;
       const scheduledTasks = yield* ScheduledTasks.ScheduledTaskService;
+      const tasks = yield* TaskService.TaskService;
       const secretRequests = yield* SecretRequests.SecretRequests;
       const guestShares = yield* GuestShareService.GuestShareService;
       const pullRequests = yield* PullRequestService.PullRequestService;
@@ -2312,6 +2314,20 @@ export const layerWsRpc = (
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
             Effect.andThen(scheduledTasks.rotateWebhookToken(input)),
           ),
+        [WS_METHODS.tasksSubscribe]: (_input) => tasks.subscribeList(),
+        [WS_METHODS.tasksUpsert]: (input) => tasks.upsert(input),
+        [WS_METHODS.tasksSetStatus]: (input) => tasks.setStatus(input),
+        [WS_METHODS.tasksDelete]: (input) => tasks.delete(input),
+        [WS_METHODS.tasksArchive]: (input) => tasks.archive(input),
+        [WS_METHODS.tasksUnarchive]: (input) => tasks.unarchive(input),
+        [WS_METHODS.tasksStart]: (input) => tasks.start(input),
+        [WS_METHODS.tasksNewThread]: (input) => tasks.newThread(input),
+        [WS_METHODS.tasksAttachThread]: (input) => tasks.attachThread(input),
+        [WS_METHODS.tasksDetachThread]: (input) => tasks.detachThread(input),
+        [WS_METHODS.tasksAddProject]: (input) => tasks.addProject(input),
+        [WS_METHODS.tasksCleanupPreview]: (input) => tasks.cleanupPreview(input),
+        [WS_METHODS.tasksCleanup]: (input) => tasks.cleanup(input),
+        [WS_METHODS.tasksSetCleanupMode]: (input) => tasks.setCleanupMode(input),
         [WS_METHODS.guestShareCreate]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
             Effect.andThen(guestShares.create(input)),
