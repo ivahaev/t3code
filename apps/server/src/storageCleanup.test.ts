@@ -367,6 +367,8 @@ const cleanupFixture = (
     let onLiveCheck: Effect.Effect<void> = Effect.void;
     let outboxStatus: string | null = null;
     let scheduledThreadIds: string[] = [];
+    // Worktree paths tasks keep; null makes the task_worktrees read fail.
+    let taskWorktreePaths: string[] | null = [];
     let fullStatusCalls = 0;
     let gitInspections = 0;
     let snapshotReads = 0;
@@ -475,44 +477,53 @@ const cleanupFixture = (
         SqlClient.SqlClient,
         sqlOverride ??
           (((strings: TemplateStringsArray) =>
-            Effect.sync(() =>
-              strings.join("").includes("retained_checkpoint_threads")
-                ? []
-                : openSessionCwd !== null &&
-                    strings.join("").includes("projection_provider_sessions")
-                  ? [
-                      {
-                        payload_json: JSON.stringify({
-                          id: "session-1",
-                          driver: "codex",
-                          providerInstanceId: "codex",
-                          status: "ready",
-                          cwd: openSessionCwd,
-                          model: null,
-                          capabilities: CodexProviderCapabilitiesV2,
-                          createdAt: "2026-06-01T12:00:00.000Z",
-                          updatedAt: "2026-06-01T12:00:00.000Z",
-                          lastError: null,
-                        }),
-                      },
-                    ]
-                  : outboxStatus !== null &&
-                      strings.join("").includes("orchestration_v2_effect_outbox")
-                    ? [{ status: outboxStatus }]
-                    : strings.join("").includes("deleted_at IS NOT NULL")
-                      ? deletedThreads.map((thread) => ({
-                          payload_json: JSON.stringify(thread),
-                          workspaceRoot: repo,
-                        }))
-                      : strings.join("").includes('AS "worktreePath"')
-                        ? [
-                            ...threads.flatMap((thread) => thread.worktreePath ?? []),
-                            ...storedWorktreePaths,
-                          ].map((worktreePath) => ({ worktreePath }))
-                        : strings.join("").includes("scheduled_tasks")
-                          ? scheduledThreadIds.map((threadId) => ({ threadId }))
-                          : [],
-            )) as unknown as SqlClient.SqlClient),
+            strings.join("").includes("task_worktrees")
+              ? taskWorktreePaths === null
+                ? Effect.fail({
+                    _tag: "SqlError",
+                    message: "no such table: task_worktrees",
+                  } as const)
+                : Effect.succeed(
+                    taskWorktreePaths.map((taskWorktreePath) => ({ taskWorktreePath })),
+                  )
+              : Effect.sync(() =>
+                  strings.join("").includes("retained_checkpoint_threads")
+                    ? []
+                    : openSessionCwd !== null &&
+                        strings.join("").includes("projection_provider_sessions")
+                      ? [
+                          {
+                            payload_json: JSON.stringify({
+                              id: "session-1",
+                              driver: "codex",
+                              providerInstanceId: "codex",
+                              status: "ready",
+                              cwd: openSessionCwd,
+                              model: null,
+                              capabilities: CodexProviderCapabilitiesV2,
+                              createdAt: "2026-06-01T12:00:00.000Z",
+                              updatedAt: "2026-06-01T12:00:00.000Z",
+                              lastError: null,
+                            }),
+                          },
+                        ]
+                      : outboxStatus !== null &&
+                          strings.join("").includes("orchestration_v2_effect_outbox")
+                        ? [{ status: outboxStatus }]
+                        : strings.join("").includes("deleted_at IS NOT NULL")
+                          ? deletedThreads.map((thread) => ({
+                              payload_json: JSON.stringify(thread),
+                              workspaceRoot: repo,
+                            }))
+                          : strings.join("").includes('AS "worktreePath"')
+                            ? [
+                                ...threads.flatMap((thread) => thread.worktreePath ?? []),
+                                ...storedWorktreePaths,
+                              ].map((worktreePath) => ({ worktreePath }))
+                            : strings.join("").includes("scheduled_tasks")
+                              ? scheduledThreadIds.map((threadId) => ({ threadId }))
+                              : [],
+                )) as unknown as SqlClient.SqlClient),
       ),
       Effect.provideService(GitManager.GitManager, {
         invalidateStatus: () => Effect.void,
@@ -581,6 +592,9 @@ const cleanupFixture = (
       },
       setScheduledThreadIds: (next: string[]) => {
         scheduledThreadIds = next;
+      },
+      setTaskWorktreePaths: (next: string[] | null) => {
+        taskWorktreePaths = next;
       },
       setDeletedThreads: (next: OrchestrationV2ThreadShell[]) => {
         deletedThreads = next;
@@ -1639,6 +1653,33 @@ describe("deleted thread worktrees", () => {
         });
         expect(yield* fixture.fs.exists(fixture.worktree)).toBe(false);
       }).pipe(Effect.provide(cleanupTestLayer)),
+  );
+
+  it.effect.each([
+    { scenario: "a task keeps it", reason: "A task keeps this worktree" },
+    { scenario: "the task list cannot be read", reason: "Task worktrees could not be read" },
+  ] as const)("keeps a deleted thread's worktree when $scenario", ({ scenario, reason }) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(NOW_MS);
+      const fixture = yield* cleanupFixture({
+        ...DEFAULT_SERVER_SETTINGS.storageCleanup,
+        worktreeAfterDays: null,
+        worktreeOnDelete: true,
+      });
+      const owner = parent(fixture.worktree);
+      fixture.setDeletedThreads([owner]);
+      fixture.setThreads([]);
+      // A trailing slash: the stored spelling still names the same worktree.
+      fixture.setTaskWorktreePaths(
+        scenario === "a task keeps it" ? [`${fixture.worktree}/`] : null,
+      );
+      expect((yield* fixture.service.runNow).entries[0]).toMatchObject({
+        threadId: owner.id,
+        outcome: "kept",
+        reason,
+      });
+      expect(yield* fixture.fs.exists(fixture.worktree)).toBe(true);
+    }).pipe(Effect.provide(cleanupTestLayer)),
   );
 
   it.effect("leaves a deleted owner's subagent on the owner's saved branch", () =>

@@ -52,6 +52,8 @@ const state = vi.hoisted(() => ({
   toasts: [] as string[],
   afterRequest: undefined as ((action: string) => void) | undefined,
   sessionLookupFails: false,
+  // Worktree paths tasks keep; null is a task list that could not be read.
+  taskWorktreePaths: [] as string[] | null,
 }));
 
 vi.mock("react", () => ({
@@ -126,6 +128,19 @@ vi.mock("../state/threads", () => ({
       "stopSession",
     ].map((action) => [action, action]),
   ),
+}));
+vi.mock("../state/tasks", () => ({
+  readEnvironmentTasks: async () =>
+    state.taskWorktreePaths === null
+      ? null
+      : [
+          {
+            worktrees: state.taskWorktreePaths.map((worktreePath) => ({
+              worktreePath,
+              removedAt: null,
+            })),
+          },
+        ],
 }));
 vi.mock("../state/vcs", () => ({
   vcsEnvironment: { removeWorktree: "removeWorktree", refreshStatus: "refreshStatus" },
@@ -261,6 +276,7 @@ const operations = [
 ] as const;
 
 beforeEach(() => {
+  state.taskWorktreePaths = [];
   state.serverConfig.shellThreadFamilies = false;
   state.familyLookupFails = false;
   state.familyThreads = [];
@@ -454,6 +470,21 @@ describe("thread action permissions", () => {
       "removeWorktree",
       "refreshStatus",
     ]);
+  });
+
+  it.each([
+    { reason: "a task still keeps it", taskWorktreePaths: ["/worktrees/thread"] },
+    { reason: "the task list cannot be read", taskWorktreePaths: null },
+  ])("keeps the worktree without asking when $reason", async ({ taskWorktreePaths }) => {
+    state.scopes
+      .get(secondary)!
+      .add(AuthOrchestrationOperateScope)
+      .add(AuthSourceControlWriteScope);
+    state.threads[0]!.worktreePath = "/worktrees/thread";
+    state.taskWorktreePaths = taskWorktreePaths;
+    expect((await useThreadActions().deleteThread(target))._tag).toBe("Success");
+    expect(state.confirm).not.toHaveBeenCalled();
+    expect(state.requests.map((request) => request.action)).toEqual(["stopSession", "delete"]);
   });
 
   it("clears the drafts of the side chats deleted with it", async () => {

@@ -1117,6 +1117,17 @@ const make = Effect.gen(function* () {
       canonicalPaths.set(resolved, key);
       return key;
     });
+    // A task keeps its worktrees until its own cleanup on Done, even after its last chat goes.
+    // A failed read is null, which keeps every worktree this run.
+    const taskWorktreeKeys = yield* sql<{ taskWorktreePath: string }>`
+      SELECT worktree_path AS "taskWorktreePath" FROM task_worktrees
+      WHERE removed_at IS NULL AND worktree_path IS NOT NULL
+    `.pipe(
+      NodeSqliteClient.readOnly,
+      Effect.flatMap((rows) => Effect.forEach(rows, (row) => canonical(row.taskWorktreePath))),
+      Effect.map((keys) => new Set(keys)),
+      Effect.orElseSucceed(() => null),
+    );
     // A cwd in a deleted folder cannot be resolved, so stored spellings are compared too.
     const occupies = Effect.fnUntraced(function* (
       worktreePaths: ReadonlyArray<string>,
@@ -1221,6 +1232,8 @@ const make = Effect.gen(function* () {
           ),
         );
         if (!exists) return;
+        if (taskWorktreeKeys === null) return keep("task worktrees could not be read");
+        if (taskWorktreeKeys.has(worktreeKey)) return keep("a task keeps this worktree");
         if (deleted && !settings.worktreeOnDelete) return keep("no rules apply");
         if (members.length > 1 && worktreeOwner(members) === undefined)
           return keep(`shared by ${members.length} threads`);

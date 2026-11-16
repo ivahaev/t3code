@@ -42,8 +42,10 @@ export function ThreadTaskChip({
         <Link
           to="/tasks/$environmentId/$taskId"
           params={{ environmentId, taskId }}
-          // The row opens the chat; the chip opens the task instead.
+          // The row opens the chat; the chip opens the task instead, also by Enter or double-click.
           onClick={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => event.stopPropagation()}
         />
       }
     >

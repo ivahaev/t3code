@@ -32,7 +32,7 @@ import { orchestrationEnvironment } from "../state/orchestration";
 import { projectEnvironment } from "../state/projects";
 import { threadEnvironment } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
-import { tasksEnvironment } from "../state/tasks";
+import { readEnvironmentTasks } from "../state/tasks";
 import { liveTaskWorktreePaths } from "../components/tasks/threadTask.logic";
 import { useNewThreadHandler } from "./useHandleNewThread";
 import { refreshArchivedThreadsForEnvironment } from "../lib/archivedThreadsState";
@@ -517,19 +517,20 @@ export function useThreadActions() {
     const environmentConfig = appAtomRegistry
       .get(environmentServerConfigsAtom)
       .get(threadRef.environmentId);
-    // The sidebar's task chips keep this subscription live, so the list is current here.
-    const tasks =
-      AsyncResult.getOrElse(
-        appAtomRegistry.get(
-          tasksEnvironment.tasksLive({ environmentId: threadRef.environmentId, input: {} }),
-        ),
-        () => null,
-      )?.tasks ?? [];
     let orphanedWorktreePath = getOrphanedWorktreePathForThread(
       survivingThreads,
       threadRef.threadId,
-      liveTaskWorktreePaths(tasks),
+      [],
     );
+    // A worktree a task keeps is not this chat's to remove. An unread task list keeps it.
+    if (orphanedWorktreePath !== null) {
+      const tasks = await readEnvironmentTasks(threadRef.environmentId);
+      orphanedWorktreePath = getOrphanedWorktreePathForThread(
+        survivingThreads,
+        threadRef.threadId,
+        tasks === null ? null : liveTaskWorktreePaths(tasks),
+      );
+    }
     // A shell that leaves idle subagent children out cannot prove nobody else uses the worktree,
     // so the server's list decides. A failed read keeps the worktree.
     if (orphanedWorktreePath !== null && environmentConfig?.shellThreadFamilies === true) {

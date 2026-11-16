@@ -1211,13 +1211,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     </div>
   );
   const titleLineIcons = metaLineEmpty ? (
-    <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
-      {remoteMachineIcon}
-      <SidebarProviderStack
-        thread={thread}
-        providerEntryByInstanceId={props.providerEntryByInstanceId}
-      />
-    </span>
+    <>
+      {taskChip}
+      <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
+        {remoteMachineIcon}
+        <SidebarProviderStack
+          thread={thread}
+          providerEntryByInstanceId={props.providerEntryByInstanceId}
+        />
+      </span>
+    </>
   ) : null;
 
   if (variant !== "card") {
