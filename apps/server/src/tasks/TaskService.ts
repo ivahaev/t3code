@@ -32,6 +32,7 @@ import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -71,6 +72,8 @@ export class TaskService extends Context.Service<
       input: TaskCleanupPreviewInput,
     ) => Effect.Effect<TaskCleanupPreview, TaskError>;
     readonly cleanup: (input: TaskCleanupInput) => Effect.Effect<TaskCleanupResult, TaskError>;
+    /** Drops a deleted thread from its task; thread deletion cleanup calls it. */
+    readonly removeThread: (threadId: ThreadId) => Effect.Effect<void>;
   }
 >()("t3/tasks/TaskService") {}
 
@@ -90,6 +93,7 @@ const notImplemented = (operation: string, taskId: TaskId) =>
 
 const make = Effect.gen(function* () {
   const store = yield* TaskStore.TaskStore;
+  const sql = yield* SqlClient.SqlClient;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
   const projects = yield* ProjectService.ProjectService;
   const git = yield* GitWorkflowService.GitWorkflowService;
@@ -119,31 +123,9 @@ const make = Effect.gen(function* () {
     .getSetting(CLEANUP_MODE_KEY)
     .pipe(Effect.map((value) => (value !== null && isCleanupMode(value) ? value : "ask")));
 
-  /** A thread is gone when its shell is missing or deleted; a failed lookup keeps it. */
-  const isThreadGone = (threadId: ThreadId) =>
-    threadManagement.getThreadShell(threadId).pipe(
-      Effect.map((shell) => shell === null || shell.deletedAt !== null),
-      Effect.orElseSucceed(() => false),
-    );
-
-  // Thread deletion has no task hook, so deleted threads are dropped here, lazily.
   const list = Effect.fn("TaskService.list")(function* () {
-    const tasks = yield* store.listAll();
-    const goneThreadIds = yield* Effect.filter(
-      tasks.flatMap((task) => task.threadIds),
-      isThreadGone,
-      { concurrency: 8 },
-    );
-    yield* Effect.forEach(goneThreadIds, store.removeThreadEverywhere, { discard: true });
-    const gone = new Set(goneThreadIds);
     return {
-      tasks:
-        gone.size === 0
-          ? tasks
-          : tasks.map((task) => ({
-              ...task,
-              threadIds: task.threadIds.filter((threadId) => !gone.has(threadId)),
-            })),
+      tasks: yield* store.listAll(),
       settings: { cleanupMode: yield* readCleanupMode },
     } satisfies TaskListResult;
   });
@@ -238,63 +220,94 @@ const make = Effect.gen(function* () {
     return `origin/${branch ?? "main"}`;
   });
 
+  // The thread lookup and the git call run before the write lock, so they do not hold up writes.
   const attachThread = Effect.fn("TaskService.attachThread")(function* (
     input: TaskAttachThreadInput,
   ) {
     yield* Effect.annotateCurrentSpan({ "task.id": input.id, "thread.id": input.threadId });
-    const task = yield* requireTask(input.id);
     const shell = yield* threadManagement
       .getThreadShell(input.threadId)
       .pipe(
         Effect.mapError(
           (cause) =>
-            new TaskError({ message: "Could not read the thread.", taskId: task.id, cause }),
+            new TaskError({ message: "Could not read the thread.", taskId: input.id, cause }),
         ),
       );
     if (shell === null || shell.deletedAt !== null) {
       return yield* new TaskError({
         message: "That thread no longer exists.",
-        taskId: task.id,
+        taskId: input.id,
         code: "not_found",
       });
     }
-    const owner = yield* store.findTaskByThread(input.threadId);
-    if (owner !== null && owner !== task.id) {
-      if (!input.moveFromOtherTask) {
-        return yield* new TaskError({
-          message: "That thread already belongs to another task.",
-          taskId: owner,
-          code: "already_attached",
-        });
-      }
-      yield* store.removeThreadEverywhere(input.threadId);
-    }
-    const projectIds = task.projectIds.includes(shell.projectId)
-      ? task.projectIds
-      : [...task.projectIds, shell.projectId];
-    const branch = shell.branch;
-    const knownWorktree = task.worktrees.some(
-      (worktree) => worktree.projectId === shell.projectId && worktree.branch === branch,
+    const { branch, worktreePath, projectId } = shell;
+    const extraWorktree =
+      worktreePath === null || branch === null
+        ? null
+        : {
+            projectId,
+            branch,
+            baseRef: yield* defaultBaseRef(projectId),
+            kind: "extra" as const,
+            worktreePath,
+            removedAt: null,
+            branchDeletedAt: null,
+          };
+    return yield* serialized(
+      Effect.gen(function* () {
+        const task = yield* requireTask(input.id);
+        const owner = yield* store.findTaskByThread(input.threadId);
+        const previous = owner === null || owner === task.id ? null : yield* store.get(owner);
+        if (previous !== null && !input.moveFromOtherTask) {
+          return yield* new TaskError({
+            message: "That thread already belongs to another task.",
+            taskId: previous.id,
+            code: "already_attached",
+          });
+        }
+        const knownWorktree = task.worktrees.some(
+          (worktree) => worktree.projectId === projectId && worktree.branch === branch,
+        );
+        const updated: Task = {
+          ...task,
+          projectIds: task.projectIds.includes(projectId)
+            ? task.projectIds
+            : [...task.projectIds, projectId],
+          worktrees:
+            extraWorktree === null || knownWorktree
+              ? task.worktrees
+              : [...task.worktrees, extraWorktree],
+          threadIds: task.threadIds.includes(input.threadId)
+            ? task.threadIds
+            : [...task.threadIds, input.threadId],
+          updatedAt: yield* nowIso,
+        };
+        // A move leaves the thread in exactly one task, even if the second write fails.
+        yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              if (previous !== null) {
+                yield* store.update({
+                  ...previous,
+                  threadIds: previous.threadIds.filter((id) => id !== input.threadId),
+                  updatedAt: updated.updatedAt,
+                });
+              }
+              yield* store.update(updated);
+            }),
+          )
+          .pipe(Effect.orDie);
+        yield* notifyChanged;
+        return { task: updated };
+      }),
     );
-    const worktrees =
-      shell.worktreePath === null || branch === null || knownWorktree
-        ? task.worktrees
-        : [
-            ...task.worktrees,
-            {
-              projectId: shell.projectId,
-              branch,
-              baseRef: yield* defaultBaseRef(shell.projectId),
-              kind: "extra" as const,
-              worktreePath: shell.worktreePath,
-              removedAt: null,
-              branchDeletedAt: null,
-            },
-          ];
-    const threadIds = task.threadIds.includes(input.threadId)
-      ? task.threadIds
-      : [...task.threadIds, input.threadId];
-    return yield* save({ ...task, projectIds, worktrees, threadIds });
+  });
+
+  const removeThread = Effect.fn("TaskService.removeThread")(function* (threadId: ThreadId) {
+    const owner = yield* store.findTaskByThread(threadId);
+    if (owner === null) return;
+    yield* store.removeThreadEverywhere(threadId);
+    yield* notifyChanged;
   }, serialized);
 
   const detachThread = Effect.fn("TaskService.detachThread")(function* (
@@ -353,6 +366,7 @@ const make = Effect.gen(function* () {
     newThread,
     cleanupPreview,
     cleanup,
+    removeThread,
   });
 });
 

@@ -10,6 +10,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
@@ -160,25 +161,37 @@ it.effect("attachThread refuses a thread of another task unless moving it", () =
       tasks.attachThread({ id: second.id, threadId, moveFromOtherTask: false }),
     );
     assert.strictEqual(error.code, "already_attached");
+    yield* TestClock.adjust("1 minute");
     yield* tasks.attachThread({ id: second.id, threadId, moveFromOtherTask: true });
     const listed = (yield* tasks.list()).tasks;
-    assert.deepStrictEqual(listed.find((t) => t.id === first.id)?.threadIds, []);
+    const movedFrom = listed.find((t) => t.id === first.id);
+    assert.deepStrictEqual(movedFrom?.threadIds, []);
+    assert.notStrictEqual(movedFrom?.updatedAt, first.updatedAt);
     assert.deepStrictEqual(listed.find((t) => t.id === second.id)?.threadIds, [threadId]);
   }).pipe(Effect.provide(testLayer)),
 );
 
-it.effect("list drops threads whose shell is gone", () =>
+it.effect("removeThread drops a deleted thread and notifies subscribers", () =>
   Effect.gen(function* () {
     const tasks = yield* TaskService.TaskService;
     const store = yield* TaskStore.TaskStore;
     const task = yield* newTask();
-    yield* store.update({
-      ...task,
-      threadIds: [ThreadId.make("th-plain"), ThreadId.make("th-gone")],
-    });
-    const listed = (yield* tasks.list()).tasks;
-    assert.deepStrictEqual(listed[0]?.threadIds, [ThreadId.make("th-plain")]);
-    assert.strictEqual(yield* store.findTaskByThread(ThreadId.make("th-gone")), null);
+    const kept = ThreadId.make("th-plain");
+    const deleted = ThreadId.make("th-gone");
+    yield* store.update({ ...task, threadIds: [kept, deleted] });
+    // The removal happens once the snapshot is out, so the subscription already exists.
+    const emitted = yield* tasks.subscribeList().pipe(
+      Stream.tap((result) =>
+        result.tasks[0]?.threadIds.length === 2 ? tasks.removeThread(deleted) : Effect.void,
+      ),
+      Stream.take(2),
+      Stream.runCollect,
+    );
+    assert.deepStrictEqual(
+      Array.from(emitted).map((result) => result.tasks[0]?.threadIds),
+      [[kept, deleted], [kept]],
+    );
+    assert.strictEqual(yield* store.findTaskByThread(deleted), null);
   }).pipe(Effect.provide(testLayer)),
 );
 

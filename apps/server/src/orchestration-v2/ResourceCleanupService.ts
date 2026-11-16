@@ -11,6 +11,7 @@ import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as TaskService from "../tasks/TaskService.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 
 export class ResourceCleanupError extends Schema.TaggedError<ResourceCleanupError>()(
@@ -51,18 +52,18 @@ export const layer = Layer.effect(
     const fileSystem = yield* FileSystem.FileSystem;
     const config = yield* ServerConfig.ServerConfig;
     const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
+    const tasks = yield* TaskService.TaskService;
     return {
       cleanupScheduledTasks: Effect.fn("ResourceCleanupService.cleanupScheduledTasks")(function (
         threadId: ThreadId,
       ) {
-        return scheduledTasks
-          .deleteForThread(threadId)
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new ResourceCleanupError({ operation: "scheduled-tasks", threadId, cause }),
-            ),
-          );
+        return scheduledTasks.deleteForThread(threadId).pipe(
+          Effect.mapError(
+            (cause) => new ResourceCleanupError({ operation: "scheduled-tasks", threadId, cause }),
+          ),
+          // A deleted thread also leaves its board task.
+          Effect.andThen(tasks.removeThread(threadId)),
+        );
       }),
       cleanupTerminals: Effect.fn("ResourceCleanupService.cleanupTerminals")(function (
         threadId: string,

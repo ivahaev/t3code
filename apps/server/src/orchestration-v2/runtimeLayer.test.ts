@@ -97,6 +97,7 @@ import * as DeviceService from "../device/DeviceService.ts";
 import * as PreviewManager from "../preview/Manager.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ResourceCleanupService from "./ResourceCleanupService.ts";
+import * as TaskService from "../tasks/TaskService.ts";
 import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import * as DelegatedTaskQuestionReactor from "./DelegatedTaskQuestionReactor.ts";
@@ -446,6 +447,7 @@ const bootedSimulatorHost = DeviceHost.DeviceHost.of({
 });
 const layerResourceCleanupTest = ResourceCleanupService.layer.pipe(
   Layer.provideMerge(layerScheduledTasksTest),
+  Layer.provide(Layer.mock(TaskService.TaskService)({ removeThread: () => Effect.void })),
   Layer.provideMerge(
     Layer.effect(
       DeviceService.DeviceService,
