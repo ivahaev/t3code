@@ -22,6 +22,7 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as TaskService from "./TaskService.ts";
 import * as TaskStore from "./TaskStore.ts";
 
@@ -100,6 +101,7 @@ const makeTestLayer = (control: LaunchControl = {}) => {
           getById: (projectId) =>
             Effect.succeedSome({ id: projectId, workspaceRoot: `/repo/${projectId}` } as Project),
         }),
+        Layer.mock(GitVcsDriver.GitVcsDriver)({}),
         Layer.mock(GitWorkflowService.GitWorkflowService)({
           resolveDefaultBranchName: () => Effect.succeed("main"),
           listLocalBranchNames: () => Effect.succeed(["main"]),

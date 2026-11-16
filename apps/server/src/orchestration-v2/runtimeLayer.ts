@@ -311,6 +311,7 @@ const layerTaskServiceProvided = TaskService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(TaskStore.layer, layerThreadManagementProvided, layerThreadLaunchProvided),
   ),
+  Layer.provide(GitVcsDriver.layer),
 );
 const layerScratchThreadPromotionProvided = ScratchThreadPromotion.layer.pipe(
   Layer.provide(

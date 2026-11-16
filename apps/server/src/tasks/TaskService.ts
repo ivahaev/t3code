@@ -1,5 +1,6 @@
 import {
   CommandId,
+  type GitCommandError,
   type OrchestrationV2ThreadShell,
   type ProjectId,
   type Task,
@@ -32,6 +33,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Result from "effect/Result";
 import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
@@ -42,7 +44,19 @@ import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { formatTaskPrompt, taskBranchName } from "./taskBranch.ts";
+import {
+  type BranchMergeState,
+  branchMergeState,
+  type CleanupProject,
+  isDeletableBranch,
+  isPendingWorktree,
+  mergeBaseCandidates,
+  refExists,
+  removableWorktreePath,
+  resolveBaseRef,
+} from "./taskCleanup.ts";
 import * as TaskStore from "./TaskStore.ts";
 
 const CLEANUP_MODE_KEY = "cleanupMode";
@@ -113,8 +127,7 @@ const fillWorktreePaths = (
     return worktreePath === null ? worktree : { ...worktree, worktreePath };
   });
 
-const hasPendingWorktree = (task: Task) =>
-  task.worktrees.some((worktree) => worktree.worktreePath === null && worktree.removedAt === null);
+const hasPendingWorktree = (task: Task) => task.worktrees.some(isPendingWorktree);
 
 /** A run that ended without a worktree path: its workspace preparation failed. */
 const ENDED_RUN_STATUSES: ReadonlySet<OrchestrationV2ThreadShell["status"]> = new Set([
@@ -129,9 +142,6 @@ type TaskShell = Pick<
 >;
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
-
-const notImplemented = (operation: string, taskId: TaskId) =>
-  Effect.fail(new TaskError({ message: `tasks.${operation} is not implemented yet.`, taskId }));
 
 const worktreePreparing = (taskId: TaskId) =>
   new TaskError({
@@ -167,6 +177,7 @@ const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const git = yield* GitWorkflowService.GitWorkflowService;
   const launches = yield* ThreadLaunchService.ThreadLaunchService;
+  const vcs = yield* GitVcsDriver.GitVcsDriver;
   // Notifications re-emit the full list; slow subscribers need only the newest dirty signal.
   const changes = yield* PubSub.sliding<void>(1);
   // Mutations read, modify and rewrite a whole task, so they run one at a time.
@@ -851,13 +862,368 @@ const make = Effect.gen(function* () {
     });
   });
 
+  /** The task with worktree paths that its threads have reported since launch. */
+  const resolveForCleanup = Effect.fn("TaskService.resolveForCleanup")(function* (id: TaskId) {
+    const task = yield* requireTask(id);
+    return yield* resolveWorktreePaths(task, yield* readPendingShells(task));
+  });
+
+  const runGit = <A>(
+    taskId: TaskId,
+    message: string,
+    effect: Effect.Effect<A, GitCommandError, GitVcsDriver.GitVcsDriver>,
+  ) =>
+    effect.pipe(
+      Effect.provideService(GitVcsDriver.GitVcsDriver, vcs),
+      Effect.mapError((cause) => new TaskError({ message, taskId, cause })),
+    );
+
+  /**
+   * Reads what cleanup needs about one project, or null when the project is gone. Any failure
+   * to learn which worktrees other threads use fails cleanup, so nothing in use is offered.
+   */
+  const inspectCleanupProject = Effect.fn("TaskService.inspectCleanupProject")(function* (
+    task: Task,
+    projectId: ProjectId,
+  ) {
+    const project = yield* projects.getById(projectId).pipe(Effect.orElseSucceed(Option.none));
+    if (Option.isNone(project)) return null;
+    const cwd = project.value.workspaceRoot;
+    const failed = (message: string) => (cause: unknown) =>
+      new TaskError({ message, taskId: task.id, cause });
+    const livePaths = yield* runGit(
+      task.id,
+      "Could not list the project's worktrees.",
+      vcs.listWorktreePaths(cwd),
+    );
+    const entries = yield* threadManagement
+      .listProjectThreads({ projectId, includeSubagents: true })
+      .pipe(Effect.mapError(failed("Could not list the project's threads.")));
+    const taskThreads = new Set<string>(task.threadIds);
+    const foreign = yield* Effect.forEach(
+      entries.filter((entry) => !taskThreads.has(entry.id)),
+      (entry) =>
+        threadManagement
+          .getThreadShell(entry.id)
+          .pipe(Effect.mapError(failed("Could not read a project thread."))),
+      { concurrency: 8 },
+    );
+    const foreignPaths = new Set<string>();
+    const foreignBranches = new Set<string>();
+    for (const shell of foreign) {
+      if (shell === null || shell.deletedAt !== null) continue;
+      if (shell.worktreePath !== null) foreignPaths.add(shell.worktreePath);
+      if (shell.branch !== null) foreignBranches.add(shell.branch);
+    }
+    const defaultBranch =
+      (yield* git.resolveDefaultBranchName(cwd, "origin").pipe(Effect.orElseSucceed(() => null))) ??
+      "main";
+    return {
+      cwd,
+      livePaths: new Set(livePaths),
+      foreignPaths,
+      foreignBranches,
+      defaultBranch,
+    } satisfies CleanupProject;
+  });
+
+  const inspectCleanupProjects = Effect.fn("TaskService.inspectCleanupProjects")(function* (
+    task: Task,
+  ) {
+    const projectIds = [...new Set(task.worktrees.map((worktree) => worktree.projectId))];
+    const inspected = yield* Effect.forEach(
+      projectIds,
+      (projectId) =>
+        inspectCleanupProject(task, projectId).pipe(
+          Effect.map((project) => [projectId, project] as const),
+        ),
+      { concurrency: 4 },
+    );
+    return new Map(
+      inspected.flatMap(([projectId, project]) =>
+        project === null ? [] : [[projectId, project] as const],
+      ),
+    );
+  });
+
+  const mergeState = Effect.fn("TaskService.mergeState")(function* (
+    taskId: TaskId,
+    project: CleanupProject,
+    worktree: TaskWorktree,
+  ) {
+    return yield* runGit(
+      taskId,
+      `Could not check whether ${worktree.branch} is merged.`,
+      Effect.gen(function* () {
+        const base = yield* resolveBaseRef(project.cwd, mergeBaseCandidates(worktree, project));
+        if (base !== null) return yield* branchMergeState(project.cwd, worktree.branch, base);
+        // With no base to compare, the branch never counts as merged.
+        const exists = yield* refExists(project.cwd, `refs/heads/${worktree.branch}`);
+        return { exists, merged: !exists, unmergedCommitCount: 0 } satisfies BranchMergeState;
+      }),
+    );
+  });
+
+  const dirtyFileCount = Effect.fn("TaskService.dirtyFileCount")(function* (
+    taskId: TaskId,
+    project: CleanupProject,
+    worktreePath: string,
+  ) {
+    // Git no longer lists it, so there is nothing to read and cleanup only marks it.
+    if (!project.livePaths.has(worktreePath)) return 0;
+    const status = yield* runGit(
+      taskId,
+      "Could not read the worktree's changes.",
+      vcs.statusDetailsLocal(worktreePath),
+    );
+    const files = status.workingTree.files.length;
+    return files > 0 || !status.hasWorkingTreeChanges ? files : 1;
+  });
+
+  /** Each branch once per project, with the task worktree that decides its base. */
+  const branchRecords = (worktrees: ReadonlyArray<TaskWorktree>) => {
+    const byBranch = new Map<string, TaskWorktree>();
+    for (const worktree of worktrees) {
+      const key = `${worktree.projectId}\u0000${worktree.branch}`;
+      const known = byBranch.get(key);
+      // The shared record wins: its base is the default branch.
+      if (known === undefined || (known.kind === "extra" && worktree.kind === "shared")) {
+        byBranch.set(key, worktree);
+      }
+    }
+    return [...byBranch.values()];
+  };
+
+  // Only git reads; the write lock is not taken.
   const cleanupPreview = Effect.fn("TaskService.cleanupPreview")(function* (
     input: TaskCleanupPreviewInput,
   ) {
-    return yield* notImplemented("cleanupPreview", input.id);
+    yield* Effect.annotateCurrentSpan({ "task.id": input.id });
+    const task = yield* resolveForCleanup(input.id);
+    const inspected = yield* inspectCleanupProjects(task);
+    const worktrees: Array<TaskCleanupPreview["worktrees"][number]> = [];
+    for (const worktree of task.worktrees) {
+      const project = inspected.get(worktree.projectId);
+      const path = project === undefined ? null : removableWorktreePath(worktree, project);
+      if (project === undefined || path === null) continue;
+      worktrees.push({
+        projectId: worktree.projectId,
+        path,
+        branch: worktree.branch,
+        dirtyFileCount: yield* dirtyFileCount(task.id, project, path),
+      });
+    }
+    const branches: Array<TaskCleanupPreview["branches"][number]> = [];
+    for (const record of branchRecords(task.worktrees)) {
+      const project = inspected.get(record.projectId);
+      if (project === undefined) continue;
+      const records = task.worktrees.filter((worktree) => worktree.projectId === record.projectId);
+      if (!isDeletableBranch(record.branch, records, project)) continue;
+      const state = yield* mergeState(task.id, project, record);
+      branches.push({
+        projectId: record.projectId,
+        branch: record.branch,
+        merged: state.merged,
+        unmergedCommitCount: state.unmergedCommitCount,
+      });
+    }
+    return { worktrees, branches } satisfies TaskCleanupPreview;
   });
+
+  /**
+   * Removes the selected worktrees, then the selected branches, and marks them in the task.
+   * Everything selected is checked before Git touches anything. Git runs outside the write
+   * lock; only the marks are written under it.
+   */
   const cleanup = Effect.fn("TaskService.cleanup")(function* (input: TaskCleanupInput) {
-    return yield* notImplemented("cleanup", input.id);
+    yield* Effect.annotateCurrentSpan({ "task.id": input.id });
+    const task = yield* resolveForCleanup(input.id);
+    if (input.worktreePaths.length === 0 && input.branches.length === 0) {
+      return { task, removedWorktrees: 0, deletedBranches: 0 } satisfies TaskCleanupResult;
+    }
+    const inspected = yield* inspectCleanupProjects(task);
+    const refuse = (message: string) => new TaskError({ message, taskId: task.id });
+
+    interface Removal {
+      readonly projectId: ProjectId;
+      readonly project: CleanupProject;
+      readonly path: string;
+      readonly branch: string;
+      /** Only a worktree the user selected may lose uncommitted changes. */
+      readonly force: boolean;
+    }
+    const removals: Array<Removal> = [];
+    for (const path of new Set(input.worktreePaths)) {
+      const worktree = task.worktrees.find(
+        (candidate) => candidate.worktreePath === path && candidate.removedAt === null,
+      );
+      const project = worktree === undefined ? undefined : inspected.get(worktree.projectId);
+      if (worktree === undefined || project === undefined) {
+        return yield* refuse(`${path} is not a worktree of this task.`);
+      }
+      if (removableWorktreePath(worktree, project) === null) {
+        return yield* refuse(`${path} is in use outside this task, so it stays.`);
+      }
+      removals.push({
+        projectId: worktree.projectId,
+        project,
+        path,
+        branch: worktree.branch,
+        force: true,
+      });
+    }
+
+    interface Deletion {
+      readonly projectId: ProjectId;
+      readonly project: CleanupProject;
+      readonly branch: string;
+      readonly record: TaskWorktree;
+      readonly force: boolean;
+      readonly exists: boolean;
+    }
+    const deletions: Array<Deletion> = [];
+    const selectedBranches = new Map(
+      input.branches.map((selected) => [`${selected.projectId}\u0000${selected.branch}`, selected]),
+    );
+    for (const selected of selectedBranches.values()) {
+      const records = task.worktrees.filter(
+        (worktree) => worktree.projectId === selected.projectId,
+      );
+      const record = branchRecords(records).find((worktree) => worktree.branch === selected.branch);
+      const project = inspected.get(selected.projectId);
+      if (record === undefined || project === undefined) {
+        return yield* refuse(`${selected.branch} is not a branch of this task.`);
+      }
+      if (
+        records.some(
+          (worktree) => worktree.branch === selected.branch && isPendingWorktree(worktree),
+        )
+      ) {
+        return yield* worktreePreparing(task.id);
+      }
+      if (!isDeletableBranch(selected.branch, records, project)) {
+        return yield* refuse(`${selected.branch} is in use outside this task, so it stays.`);
+      }
+      const state = yield* mergeState(task.id, project, record);
+      if (state.exists && !state.merged && !selected.force) {
+        return yield* refuse(
+          `${selected.branch} has ${state.unmergedCommitCount} unmerged commits; confirm to delete it anyway.`,
+        );
+      }
+      // Git cannot delete a branch while a worktree has it checked out, so that worktree goes too.
+      for (const worktree of records) {
+        const path =
+          worktree.branch === selected.branch ? removableWorktreePath(worktree, project) : null;
+        if (path === null || removals.some((removal) => removal.path === path)) continue;
+        removals.push({
+          projectId: selected.projectId,
+          project,
+          path,
+          branch: selected.branch,
+          force: false,
+        });
+      }
+      deletions.push({
+        projectId: selected.projectId,
+        project,
+        branch: selected.branch,
+        record,
+        force: selected.force,
+        exists: state.exists,
+      });
+    }
+
+    const failures: Array<string> = [];
+    const removedPaths = new Set<string>();
+    for (const removal of removals) {
+      // A path Git no longer lists is not touched: another checkout may sit there now.
+      const effect = removal.project.livePaths.has(removal.path)
+        ? vcs.removeWorktree({ cwd: removal.project.cwd, path: removal.path, force: removal.force })
+        : vcs.pruneWorktrees({ cwd: removal.project.cwd });
+      const result = yield* Effect.result(
+        runGit(task.id, `Could not remove ${removal.path}.`, effect),
+      );
+      if (Result.isSuccess(result)) removedPaths.add(removal.path);
+      else failures.push(result.failure.message);
+    }
+
+    const deletedBranches = new Set<string>();
+    for (const deletion of deletions) {
+      const key = `${deletion.projectId}\u0000${deletion.branch}`;
+      const blocked = removals.some(
+        (removal) =>
+          removal.projectId === deletion.projectId &&
+          removal.branch === deletion.branch &&
+          !removedPaths.has(removal.path),
+      );
+      if (blocked) {
+        failures.push(`${deletion.branch} stays: its worktree could not be removed.`);
+        continue;
+      }
+      if (!deletion.exists) {
+        deletedBranches.add(key);
+        continue;
+      }
+      const deleted = yield* Effect.result(
+        Effect.gen(function* () {
+          // Its worktree is gone now, so nothing adds commits after this check.
+          const state = yield* mergeState(task.id, deletion.project, deletion.record);
+          if (!state.exists) return;
+          if (!state.merged && !deletion.force) {
+            return yield* refuse(`${deletion.branch} gained unmerged commits, so it stays.`);
+          }
+          // "Merged" was checked against the task's base; `git branch -d` would check HEAD.
+          yield* runGit(
+            task.id,
+            `Could not delete ${deletion.branch}.`,
+            vcs.deleteLocalBranch({
+              cwd: deletion.project.cwd,
+              refName: deletion.branch,
+              force: true,
+            }),
+          );
+        }),
+      );
+      if (Result.isSuccess(deleted)) deletedBranches.add(key);
+      else failures.push(deleted.failure.message);
+    }
+
+    const result = yield* serialized(
+      Effect.gen(function* () {
+        const current = yield* requireTask(task.id);
+        const now = yield* nowIso;
+        let removedWorktrees = 0;
+        const deletedKeys = new Set<string>();
+        const worktrees = current.worktrees.map((worktree) => {
+          let next = worktree;
+          if (
+            worktree.removedAt === null &&
+            worktree.worktreePath !== null &&
+            removedPaths.has(worktree.worktreePath)
+          ) {
+            next = { ...next, removedAt: now };
+            removedWorktrees += 1;
+          }
+          if (
+            worktree.branchDeletedAt === null &&
+            deletedBranches.has(`${worktree.projectId}\u0000${worktree.branch}`)
+          ) {
+            next = { ...next, branchDeletedAt: now };
+            deletedKeys.add(`${worktree.projectId}\u0000${worktree.branch}`);
+          }
+          return next;
+        });
+        const saved =
+          removedWorktrees === 0 && deletedKeys.size === 0
+            ? current
+            : (yield* save({ ...current, worktrees })).task;
+        return { task: saved, removedWorktrees, deletedBranches: deletedKeys.size };
+      }),
+    );
+    if (failures.length > 0) {
+      return yield* refuse(failures.join(" "));
+    }
+    return result satisfies TaskCleanupResult;
   });
 
   return TaskService.of({
