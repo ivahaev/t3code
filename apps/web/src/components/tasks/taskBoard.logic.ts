@@ -1,6 +1,7 @@
 import type { EnvironmentId, ProjectId, Task, TaskStatus } from "@t3tools/contracts";
 
 import { sortColumn, type TaskAttention } from "./taskAttention.logic";
+import { plural } from "./taskCleanup.logic";
 
 export const TASK_STATUSES = [
   "backlog",
@@ -10,10 +11,10 @@ export const TASK_STATUSES = [
 ] as const satisfies ReadonlyArray<TaskStatus>;
 
 export const TASK_STATUS_LABEL: Record<TaskStatus, string> = {
-  backlog: "Бэклог",
-  in_progress: "В работе",
-  review: "Ревью",
-  done: "Готово",
+  backlog: "Backlog",
+  in_progress: "In progress",
+  review: "Review",
+  done: "Done",
 };
 
 /** The board shows only the latest finished tasks; older ones stay reachable through the archive. */
@@ -79,17 +80,6 @@ export function neighborStatus(status: TaskStatus, step: -1 | 1): TaskStatus | n
   return TASK_STATUSES[TASK_STATUSES.indexOf(status) + step] ?? null;
 }
 
-/** "1 чат", "2 чата", "5 чатов". */
 export function chatCountLabel(count: number): string {
-  const lastTwo = count % 100;
-  const last = count % 10;
-  const word =
-    lastTwo >= 11 && lastTwo <= 14
-      ? "чатов"
-      : last === 1
-        ? "чат"
-        : last >= 2 && last <= 4
-          ? "чата"
-          : "чатов";
-  return `${count} ${word}`;
+  return `${count} ${plural(count, "thread", "threads")}`;
 }

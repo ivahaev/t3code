@@ -7,7 +7,8 @@ import {
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { taskErrorCode } from "./taskDetail.logic";
 
-const WORKTREE_PREPARING_MESSAGE = "Worktree задачи ещё готовится, попробуйте через минуту";
+const WORKTREE_PREPARING_MESSAGE =
+  "The task's worktree is still being prepared. Try again in a minute.";
 
 /** Shows a failed task command; the server's `TaskError` messages are written for the user. */
 export function toastTaskCommandFailure(
@@ -17,12 +18,12 @@ export function toastTaskCommandFailure(
   if (result._tag !== "Failure") return false;
   if (isAtomCommandInterrupted(result)) return true;
   const error = squashAtomCommandFailure(result);
-  // Not a failure: the first chat of the task started, and the requested one comes on retry.
+  // Not a failure: the first thread of the task started, and the requested one comes on retry.
   if (taskErrorCode(error) === "shared_worktree_started") {
     toastManager.add(
       stackedThreadToast({
         type: "warning",
-        title: "Первый чат задачи уже запущен",
+        title: "The task's first thread already started",
         description: (error as Error).message,
       }),
     );
@@ -48,7 +49,7 @@ export function toastTaskStartBlocked(reason: string): void {
   toastManager.add(
     stackedThreadToast({
       type: "error",
-      title: "Нельзя взять задачу в работу",
+      title: "Couldn't start task",
       description: reason,
     }),
   );

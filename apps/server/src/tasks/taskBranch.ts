@@ -83,7 +83,7 @@ export const formatTaskPrompt = (task: Pick<Task, "title" | "description" | "lin
   [
     task.title,
     task.description.trim(),
-    task.link === null || task.link.trim() === "" ? "" : `Ссылка: ${task.link.trim()}`,
+    task.link === null || task.link.trim() === "" ? "" : `Link: ${task.link.trim()}`,
   ]
     .filter((part) => part !== "")
     .join("\n\n");

@@ -164,11 +164,9 @@ describe("autoCleanupPlan", () => {
 
 describe("cleanupSummary", () => {
   it.each([
-    [1, 1, "Удалено 1 worktree, 1 ветка"],
-    [2, 3, "Удалено 2 worktree, 3 ветки"],
-    [0, 5, "Удалено 0 worktree, 5 веток"],
-    [1, 11, "Удалено 1 worktree, 11 веток"],
-    [1, 21, "Удалено 1 worktree, 21 ветка"],
+    [1, 1, "Removed 1 worktree and 1 branch"],
+    [2, 3, "Removed 2 worktrees and 3 branches"],
+    [0, 5, "Removed 0 worktrees and 5 branches"],
   ])("%i worktree and %i branches", (worktrees, branches, text) => {
     expect(cleanupSummary(worktrees, branches)).toBe(text);
   });
@@ -187,7 +185,7 @@ const taskWorktree = (overrides: Partial<TaskWorktree>): TaskWorktree => ({
 
 const makeTask = (overrides: Partial<Task>): Task => ({
   id: TaskId.make("task:pay"),
-  title: "Оплата картой",
+  title: "Card payments",
   description: "",
   link: null,
   status: "done",
@@ -209,7 +207,7 @@ describe("leavingDoneConfirmation", () => {
 
   it("warns when a done task with a deleted shared branch moves back", () => {
     expect(leavingDoneConfirmation(makeTask({ worktrees: [deleted] }), "review")).toBe(
-      "Ветка задачи удалена, новый чат создаст её заново от базы",
+      "The task's branch was deleted. The next thread will create it again from the base.",
     );
   });
 

@@ -2,7 +2,13 @@ import { TaskId, ProjectId } from "@t3tools/contracts";
 import type { Task } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { sortColumn, taskAttention, taskAttentionLabel } from "./taskAttention.logic";
+import {
+  orderCardThreads,
+  sortColumn,
+  taskAttention,
+  taskAttentionStatus,
+  threadRowStatus,
+} from "./taskAttention.logic";
 
 const idle = {
   hasActionableProposedPlan: false,
@@ -53,13 +59,26 @@ describe("taskAttention", () => {
   });
 });
 
-describe("taskAttentionLabel", () => {
-  it("labels each state", () => {
-    expect(taskAttentionLabel("attention")).toEqual({ glyph: "●", text: "вопрос" });
-    expect(taskAttentionLabel("unread")).toEqual({ glyph: "●", text: "готово" });
-    expect(taskAttentionLabel("failed")).toEqual({ glyph: "✕", text: "ошибка" });
-    expect(taskAttentionLabel("working")).toEqual({ glyph: "⟳", text: "работает" });
-    expect(taskAttentionLabel(null)).toBeNull();
+describe("taskAttentionStatus", () => {
+  it("shows the most urgent thread's status in the sidebar's words", () => {
+    expect(taskAttentionStatus([working as never, input as never])?.label).toBe("Input");
+    expect(taskAttentionStatus([working as never])?.label).toBe("Working");
+    expect(taskAttentionStatus([idle as never])).toBeNull();
+  });
+});
+
+describe("orderCardThreads", () => {
+  it("puts threads that need the user first, then the newest", () => {
+    const rows = [
+      { ...idle, id: "old", updatedAt: "2026-03-09T09:00:00.000Z" },
+      { ...working, id: "busy", updatedAt: "2026-03-09T08:00:00.000Z" },
+      { ...idle, id: "new", updatedAt: "2026-03-09T11:00:00.000Z" },
+      { ...input, id: "asks", updatedAt: "2026-03-09T07:00:00.000Z" },
+    ];
+    const ordered = orderCardThreads(
+      rows.map((thread) => ({ thread, status: threadRowStatus(thread as never) })),
+    );
+    expect(ordered.map(({ thread }) => thread.id)).toEqual(["asks", "busy", "new", "old"]);
   });
 });
 

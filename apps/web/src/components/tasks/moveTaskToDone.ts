@@ -26,7 +26,7 @@ export interface TaskCleanupRequest {
   readonly environmentId: EnvironmentId;
   readonly task: Task;
   readonly preview: TaskCleanupPreview;
-  /** False when the mode is already `always`, so the dialog hides «Делать так всегда». */
+  /** False when the mode is already `always`, so the dialog hides "Always do this". */
   readonly offerAlways: boolean;
 }
 
@@ -67,7 +67,7 @@ export async function moveTaskToDone(input: {
   if (moved._tag !== "Success" || cleanupMode === "never" || !input.canCleanup) return moved;
 
   const preview = await deps.previewTaskCleanup({ environmentId, input: { id: task.id } });
-  if (toastTaskCommandFailure("Не удалось проверить worktree задачи", preview)) return moved;
+  if (toastTaskCommandFailure("Couldn't check the task's worktrees", preview)) return moved;
   if (preview._tag !== "Success" || isEmptyCleanupPreview(preview.value)) return moved;
 
   if (cleanupMode === "ask") {
@@ -81,7 +81,7 @@ export async function moveTaskToDone(input: {
       input: { id: task.id, ...plan.silent },
     });
     if (cleaned._tag === "Success") toastCleanupDone(cleaned.value);
-    else toastTaskCommandFailure("Не удалось убрать за задачей", cleaned);
+    else toastTaskCommandFailure("Couldn't clean up after the task", cleaned);
   }
   if (plan.needsDialog !== null) {
     deps.openCleanupDialog({ environmentId, task, preview: plan.needsDialog, offerAlways: false });

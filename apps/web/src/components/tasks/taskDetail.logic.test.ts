@@ -44,7 +44,7 @@ const shell = (id: string, projectId: ProjectId, branch: string | null) => ({
 
 const makeTask = (overrides: Partial<Task>): Task => ({
   id: TaskId.make("task:pay"),
-  title: "Оплата картой",
+  title: "Card payments",
   description: "",
   link: null,
   status: "in_progress",
@@ -217,7 +217,7 @@ describe("worktree diff", () => {
       branch: preview("branch-range", [[1, 1]]),
       workingTree: null,
       pending: false,
-      errors: ["Незакоммиченные изменения: no access"],
+      errors: ["Uncommitted changes: no access"],
     });
     expect(worktreeDiffState(loaded, AsyncResult.initial(), format).pending).toBe(true);
   });
@@ -228,11 +228,11 @@ describe("task actions", () => {
     const task = makeTask({ status: "backlog", projectIds: [backend, frontend] });
     expect(taskStartBlocker(task, new Set([backend]))).toBeNull();
     expect(taskStartBlocker(task, new Set([frontend]))).toBe(
-      "Основной проект задачи недоступен в этом environment.",
+      "The task's main project isn't available in this environment.",
     );
     expect(
       taskStartBlocker({ ...task, archivedAt: "2026-11-03T00:00:00.000Z" }, new Set([backend])),
-    ).toBe("Задача в архиве.");
+    ).toBe("The task is archived.");
   });
 
   it("opens a new chat in the primary project, another available one, or none", () => {
@@ -249,13 +249,13 @@ describe("task actions", () => {
       updatedAt,
       deletedAt: null as string | null,
     });
-    const own = chat("own", "Оплата API", null, "2026-11-05");
+    const own = chat("own", "Payments API", null, "2026-11-05");
     const deleted = {
-      ...chat("deleted", "Оплата UI", null, "2026-11-05"),
+      ...chat("deleted", "Payments UI", null, "2026-11-05"),
       deletedAt: "2026-11-06",
     };
-    const older = chat("older", "Ретраи", "pay-retry", "2026-11-01");
-    const newer = chat("newer", "Другое", null, "2026-11-04");
+    const older = chat("older", "Retries", "pay-retry", "2026-11-01");
+    const newer = chat("newer", "Other", null, "2026-11-04");
     const task = makeTask({ threadIds: [own.id] });
     const shells = [own, deleted, older, newer];
     const projectTitles = new Map([[backend, "backend"]]);

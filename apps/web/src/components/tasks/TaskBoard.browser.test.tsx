@@ -97,9 +97,9 @@ function setup() {
   vi.clearAllMocks();
   const list: TaskListResult = {
     tasks: [
-      task("task:dark", "Тёмная тема", "backlog", 1),
-      task("task:pay", "Оплата картой", "in_progress", 1),
-      task("task:auth", "Рефакторинг auth", "review", 1),
+      task("task:dark", "Dark theme", "backlog", 1),
+      task("task:pay", "Card payments", "in_progress", 1),
+      task("task:auth", "Auth refactor", "review", 1),
     ],
     settings: { cleanupMode: "ask" },
   };
@@ -117,13 +117,13 @@ describe("TaskBoard", () => {
     );
 
     const column = (name: string) => screen.getByRole("region", { name, exact: false });
-    await expect.element(column("Бэклог").getByText("Тёмная тема")).toBeVisible();
-    await expect.element(column("В работе").getByText("Оплата картой")).toBeVisible();
-    await expect.element(column("Ревью").getByText("Рефакторинг auth")).toBeVisible();
-    await expect.element(column("Готово")).toBeVisible();
+    await expect.element(column("Backlog").getByText("Dark theme")).toBeVisible();
+    await expect.element(column("In progress").getByText("Card payments")).toBeVisible();
+    await expect.element(column("Review").getByText("Auth refactor")).toBeVisible();
+    await expect.element(column("Done")).toBeVisible();
 
-    await userEvent.click(screen.getByRole("button", { name: "Действия: Оплата картой" }));
-    await userEvent.click(page.getByRole("menuitem", { name: "Перенести в Ревью" }));
+    await userEvent.click(screen.getByRole("button", { name: "Actions for Card payments" }));
+    await userEvent.click(page.getByRole("menuitem", { name: "Move to Review" }));
 
     expect(state.command).toHaveBeenCalledWith("set-status", {
       environmentId,
@@ -139,7 +139,7 @@ describe("TaskBoard", () => {
       </RegistryContext.Provider>,
     );
 
-    const card = screen.getByRole("article", { name: "Оплата картой" });
+    const card = screen.getByRole("article", { name: "Card payments" });
     await expect.element(card).toBeVisible();
     (card.element() as HTMLElement).focus();
     // A Russian layout types "Ъ" on this key; the shortcut follows the key, not the letter.

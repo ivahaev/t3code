@@ -34,11 +34,11 @@ describe("taskBranchName", () => {
 describe("formatTaskPrompt", () => {
   it("puts the title first, then the description and the link", () => {
     expect(
-      formatTaskPrompt({ title: "Оплата", description: "Сделать оплату", link: "https://x/1" }),
-    ).toBe("Оплата\n\nСделать оплату\n\nСсылка: https://x/1");
+      formatTaskPrompt({ title: "Payments", description: "Add payments", link: "https://x/1" }),
+    ).toBe("Payments\n\nAdd payments\n\nLink: https://x/1");
   });
 
   it("omits an empty description and a missing link", () => {
-    expect(formatTaskPrompt({ title: "Оплата", description: "  ", link: null })).toBe("Оплата");
+    expect(formatTaskPrompt({ title: "Payments", description: "  ", link: null })).toBe("Payments");
   });
 });

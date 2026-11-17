@@ -1663,8 +1663,8 @@ function OpenCommandPaletteDialog(props: {
   actionItems.push({
     kind: "action",
     value: "action:tasks",
-    searchTerms: ["задачи", "tasks", "board", "kanban", "доска"],
-    title: "Задачи",
+    searchTerms: ["tasks", "board", "kanban"],
+    title: "Tasks",
     icon: <SquareKanbanIcon className={ITEM_ICON_CLASS} />,
     run: async () => {
       await navigate({ to: "/tasks" });

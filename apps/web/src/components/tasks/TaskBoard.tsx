@@ -36,11 +36,16 @@ import {
 import { WorkspacePageHeader } from "../WorkspacePageHeader";
 import { confirmLeavingDone } from "./moveTaskToDone";
 import { leavingDoneConfirmation } from "./taskCleanup.logic";
-import { TaskCard, type TaskCardActions } from "./TaskCard";
+import { TaskCard, type TaskCardActions, type TaskCardThread } from "./TaskCard";
 import { useMoveTaskToDone } from "./TaskCleanupDialog";
 import { toastTaskCommandFailure, toastTaskStartBlocked } from "./taskCommandToast";
 import { taskStartBlocker } from "./taskDetail.logic";
-import { taskAttention, type TaskAttention } from "./taskAttention.logic";
+import {
+  orderCardThreads,
+  taskAttention,
+  threadRowStatus,
+  type TaskAttention,
+} from "./taskAttention.logic";
 import {
   boardColumns,
   boardTaskKey,
@@ -117,24 +122,27 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
     shells.map((shell) => [scopedThreadKey(scopeThreadRef(shell.environmentId, shell.id)), shell]),
   );
   const attentionById: Record<string, TaskAttention> = {};
+  const threadsById: Record<string, TaskCardThread[]> = {};
   for (const { environmentId, task } of entries) {
-    attentionById[task.id] = taskAttention(
-      task.threadIds.flatMap((threadId) => {
-        const key = scopedThreadKey(scopeThreadRef(environmentId, threadId));
-        const shell = shellsByKey.get(key);
-        return shell
-          ? [
-              {
-                ...shell,
-                lastVisitedAt: resolveThreadLastVisitedAt(
-                  shell.lastVisitedAt,
-                  localLastVisitedAtById[key],
-                ),
-              },
-            ]
-          : [];
-      }),
-    );
+    const threads = task.threadIds.flatMap((threadId) => {
+      const key = scopedThreadKey(scopeThreadRef(environmentId, threadId));
+      const shell = shellsByKey.get(key);
+      return shell
+        ? [
+            {
+              ...shell,
+              lastVisitedAt: resolveThreadLastVisitedAt(
+                shell.lastVisitedAt,
+                localLastVisitedAtById[key],
+              ),
+            },
+          ]
+        : [];
+    });
+    attentionById[task.id] = taskAttention(threads);
+    threadsById[task.id] = orderCardThreads(
+      threads.map((thread) => ({ thread, status: threadRowStatus(thread) })),
+    ).map(({ thread, status }) => ({ id: thread.id, title: thread.title, status }));
   }
   const columns = boardColumns(entries, attentionById, {
     archived,
@@ -179,7 +187,7 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
       setKeyboardMovedKey(null);
       return;
     }
-    // A task without chats starts through the dialog; one that already has chats only moves.
+    // A task without threads starts through the dialog; one that already has threads only moves.
     if (task.status === "backlog" && status === "in_progress" && task.threadIds.length === 0) {
       setKeyboardMovedKey(null);
       const blocker = taskStartBlocker(
@@ -199,15 +207,15 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
         ? await moveToDone(environmentId, task)
         : await setTaskStatus({ environmentId, input: { id: task.id, status } });
     // A card that stays in its column keeps its focus; nothing remounts to take it back.
-    if (toastTaskCommandFailure("Не удалось перенести задачу", result)) setKeyboardMovedKey(null);
+    if (toastTaskCommandFailure("Couldn't move task", result)) setKeyboardMovedKey(null);
   };
   const remove = async ({ environmentId, task }: BoardTask) => {
-    const message = `Удалить задачу «${task.title}»?\nЧаты, worktree и ветки останутся.`;
+    const message = `Delete task “${task.title}”?\nIts threads, worktrees and branches stay.`;
     const confirmed =
       (await requestConfirmDialog(message, { variant: "destructive" })) ?? window.confirm(message);
     if (!confirmed) return;
     const result = await deleteTask({ environmentId, input: { id: task.id } });
-    toastTaskCommandFailure("Не удалось удалить задачу", result);
+    toastTaskCommandFailure("Couldn't delete task", result);
   };
   const actions: TaskCardActions = {
     onMove: (entry, status) => void move(entry, status),
@@ -219,11 +227,11 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
     onEdit: (entry) => setEditor({ environmentId: entry.environmentId, task: entry.task }),
     onArchive: ({ environmentId, task }) =>
       void archiveTask({ environmentId, input: { id: task.id } }).then((result) =>
-        toastTaskCommandFailure("Не удалось архивировать задачу", result),
+        toastTaskCommandFailure("Couldn't archive task", result),
       ),
     onUnarchive: ({ environmentId, task }) =>
       void unarchiveTask({ environmentId, input: { id: task.id } }).then((result) =>
-        toastTaskCommandFailure("Не удалось вернуть задачу из архива", result),
+        toastTaskCommandFailure("Couldn't restore task", result),
       ),
     onDelete: (entry) => void remove(entry),
   };
@@ -241,7 +249,7 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
   return (
     <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none">
       <WorkspacePageHeader electron={isElectron}>
-        <WorkspaceBreadcrumb ariaLabel="Задачи">
+        <WorkspaceBreadcrumb ariaLabel="Tasks">
           {archived ? (
             <>
               <WorkspaceBreadcrumbItem>
@@ -249,17 +257,17 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
                   to="/tasks"
                   search={{ environment: search.environment, project: search.project }}
                 >
-                  Задачи
+                  Tasks
                 </Link>
               </WorkspaceBreadcrumbItem>
               <WorkspaceBreadcrumbSeparator />
               <WorkspaceBreadcrumbItem current>
-                <h1 className="truncate">Архив</h1>
+                <h1 className="truncate">Archived</h1>
               </WorkspaceBreadcrumbItem>
             </>
           ) : (
             <WorkspaceBreadcrumbItem current>
-              <h1 className="truncate">Задачи</h1>
+              <h1 className="truncate">Tasks</h1>
             </WorkspaceBreadcrumbItem>
           )}
         </WorkspaceBreadcrumb>
@@ -272,16 +280,16 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
             })
           }
         >
-          <SelectTrigger size="sm" aria-label="Проект" className="w-auto max-w-48">
+          <SelectTrigger size="sm" aria-label="Project" className="w-auto max-w-48">
             <SelectValue>
               {search.project === undefined
-                ? "Проект: все"
-                : `Проект: ${projectOptions.find(([id]) => id === search.project)?.[1] ?? search.project}`}
+                ? "Project: All"
+                : `Project: ${projectOptions.find(([id]) => id === search.project)?.[1] ?? search.project}`}
             </SelectValue>
           </SelectTrigger>
           <SelectPopup>
-            <SelectItem value={ALL} label="Все проекты">
-              Все проекты
+            <SelectItem value={ALL} label="All projects">
+              All projects
             </SelectItem>
             {projectOptions.map(([id, title]) => (
               <SelectItem key={id} value={id} label={title}>
@@ -302,13 +310,13 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
             <SelectTrigger size="sm" aria-label="Environment" className="w-auto max-w-48">
               <SelectValue>
                 {search.environment === undefined
-                  ? "Environment: все"
+                  ? "Environment: All"
                   : `Environment: ${environmentLabel(search.environment)}`}
               </SelectValue>
             </SelectTrigger>
             <SelectPopup>
-              <SelectItem value={ALL} label="Все environment">
-                Все environment
+              <SelectItem value={ALL} label="All environments">
+                All environments
               </SelectItem>
               {connectedEnvironments.map((entry) => (
                 <SelectItem
@@ -324,7 +332,7 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
         ) : null}
         <Button size="sm" disabled={!creationEnvironment} onClick={openCreate}>
           <PlusIcon />
-          Задача
+          New task
         </Button>
       </WorkspacePageHeader>
 
@@ -334,8 +342,8 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
             <EmptyMedia variant="icon">
               <SquareKanbanIcon />
             </EmptyMedia>
-            <EmptyTitle>Нет подключённых environment</EmptyTitle>
-            <EmptyDescription>Задачи появятся, когда подключится environment.</EmptyDescription>
+            <EmptyTitle>No connected environments</EmptyTitle>
+            <EmptyDescription>Tasks appear once an environment connects.</EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (
@@ -379,7 +387,7 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
                         onClick={openCreate}
                       >
                         <PlusIcon />
-                        задача
+                        Add task
                       </Button>
                     ) : null
                   }
@@ -394,7 +402,7 @@ export function TaskBoard({ search }: { readonly search: TasksSearch }) {
                           (projectId) =>
                             projectTitles.get(`${entry.environmentId}\n${projectId}`) ?? projectId,
                         )}
-                        attention={attentionById[entry.task.id] ?? null}
+                        threads={threadsById[entry.task.id] ?? []}
                         canEdit={canEditIn(entry.environmentId)}
                         refocus={keyboardMovedKey === key}
                         actions={actions}
@@ -456,7 +464,7 @@ function TaskColumn({
       ref={setNodeRef}
       aria-label={label}
       data-drop-target={isOver || undefined}
-      className="flex max-h-full w-72 shrink-0 flex-col rounded-xl bg-muted/40 data-drop-target:bg-accent/60"
+      className="flex max-h-full min-w-56 max-w-96 flex-1 basis-0 flex-col rounded-xl bg-muted/40 data-drop-target:bg-accent/60"
     >
       <header className="flex items-center gap-2 px-3 pt-2.5 pb-1.5">
         <h2 className="text-sm font-medium">
@@ -468,7 +476,7 @@ function TaskColumn({
             search={{ ...search, archived: 1 }}
             className="ms-auto text-xs text-muted-foreground hover:text-foreground"
           >
-            Архив
+            Archive
           </Link>
         ) : null}
       </header>

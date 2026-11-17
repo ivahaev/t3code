@@ -1,16 +1,20 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId, ProjectId, Task } from "@t3tools/contracts";
 import { useState } from "react";
+import { isScratchProject } from "@t3tools/client-runtime/state/projects";
+
+import { useScratchProject } from "~/hooks/useScratchProject";
 
 import { useProjects } from "~/state/entities";
 import { tasksEnvironment } from "~/state/tasks";
 import { useAtomCommand } from "~/state/use-atom-command";
-import { Badge } from "../ui/badge";
+import { ProjectFavicon } from "../ProjectFavicon";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
   DialogClose,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogPanel,
@@ -18,10 +22,10 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Input } from "../ui/input";
-import { Label } from "../ui/label";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { toastTaskCommandFailure } from "./taskCommandToast";
+import { TaskField } from "./taskDialogParts";
 
 export interface TaskEditorTarget {
   readonly environmentId: EnvironmentId;
@@ -50,7 +54,7 @@ export function TaskEditorDialog({
         if (!open && !saving) onClose();
       }}
     >
-      <DialogPopup className="max-w-lg">
+      <DialogPopup className="max-w-xl">
         <TaskEditorForm
           target={target}
           environments={environments}
@@ -84,15 +88,18 @@ function TaskEditorForm({
   const [title, setTitle] = useState(task?.title ?? "");
   const [description, setDescription] = useState(task?.description ?? "");
   const [link, setLink] = useState(task?.link ?? "");
-  // Selection order matters: the first repository is where the task's first chat starts.
+  // Selection order matters: the first project is where the task's first chat starts.
   const [projectIds, setProjectIds] = useState<ReadonlyArray<ProjectId>>(
     task
       ? [task.primaryProjectId, ...task.projectIds.filter((id) => id !== task.primaryProjectId)]
       : [],
   );
+  const { scratchWorkspaceRootFor } = useScratchProject();
+  // "No project" has no repository, so a task can't make worktrees in it.
   const projects = useProjects().filter(
     (project) =>
       project.environmentId === environmentId &&
+      !isScratchProject(project, scratchWorkspaceRootFor(environmentId)) &&
       (project.archivedAt == null || projectIds.includes(project.id)),
   );
   const canSave = useAtomValue(tasksEnvironment.upsertTask.permissionAtom(environmentId));
@@ -115,7 +122,7 @@ function TaskEditorForm({
       },
     });
     onSavingChange(false);
-    if (toastTaskCommandFailure("Не удалось сохранить задачу", result)) return;
+    if (toastTaskCommandFailure("Couldn't save task", result)) return;
     onClose();
   };
 
@@ -128,13 +135,17 @@ function TaskEditorForm({
       }}
     >
       <DialogHeader>
-        <DialogTitle>{task ? "Задача" : "Новая задача"}</DialogTitle>
+        <DialogTitle>{task ? "Edit task" : "New task"}</DialogTitle>
+        <DialogDescription>
+          {task
+            ? "Changes apply to the task card. Its threads keep their own titles."
+            : "The task starts in Backlog. Start it to open its first thread."}
+        </DialogDescription>
       </DialogHeader>
       <DialogPanel>
         <div className="flex flex-col gap-4">
           {task === null && environments.length > 1 ? (
-            <div className="space-y-1.5">
-              <Label htmlFor="task-environment">Environment</Label>
+            <TaskField label="Environment" htmlFor="task-environment">
               <Select
                 value={environmentId}
                 onValueChange={(next) => {
@@ -160,37 +171,46 @@ function TaskEditorForm({
                   ))}
                 </SelectPopup>
               </Select>
-            </div>
+            </TaskField>
           ) : null}
-          <div className="space-y-1.5">
-            <Label htmlFor="task-title">Заголовок</Label>
+          <TaskField label="Title" htmlFor="task-title">
             <Input
               id="task-title"
               autoFocus
+              placeholder="What needs to be done"
               value={title}
               onChange={(event) => setTitle(event.target.value)}
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="task-description">Описание</Label>
+          </TaskField>
+          <TaskField
+            label="Description"
+            hint="Sent to the agent on start"
+            htmlFor="task-description"
+          >
             <Textarea
               id="task-description"
               className="max-h-64 overflow-y-auto"
+              placeholder="Context, acceptance criteria, links"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
             />
-          </div>
+          </TaskField>
           <fieldset className="space-y-1.5">
-            <legend className="mb-1.5 text-sm font-medium">Репозитории</legend>
+            <legend className="mb-1.5 flex w-full items-baseline justify-between text-sm font-medium">
+              <span>Projects</span>
+              <span className="font-normal text-2xs text-muted-foreground/80">
+                The first one is where the task starts
+              </span>
+            </legend>
             {projects.length === 0 ? (
-              <p className="text-sm text-muted-foreground">В этом environment нет проектов.</p>
+              <p className="text-sm text-muted-foreground">No projects in this environment.</p>
             ) : (
-              <ul className="max-h-48 space-y-1 overflow-y-auto">
+              <ul className="max-h-48 divide-y divide-border/50 overflow-y-auto rounded-xl border border-border/70">
                 {projects.map((project) => {
                   const checked = projectIds.includes(project.id);
                   return (
                     <li key={project.id}>
-                      <label className="flex cursor-pointer items-center gap-2 text-sm">
+                      <label className="flex cursor-pointer items-center gap-2.5 px-3 py-2 text-sm hover:bg-accent/50">
                         <Checkbox
                           checked={checked}
                           onCheckedChange={(next) =>
@@ -201,11 +221,12 @@ function TaskEditorForm({
                             )
                           }
                         />
-                        <span className="min-w-0 truncate">{project.title}</span>
+                        <ProjectFavicon project={project} className="size-4 shrink-0" />
+                        <span className="min-w-0 flex-1 truncate">{project.title}</span>
                         {project.id === primaryProjectId ? (
-                          <Badge variant="outline" size="sm">
-                            основной
-                          </Badge>
+                          <span className="shrink-0 text-xs text-muted-foreground">
+                            Starts here
+                          </span>
                         ) : null}
                       </label>
                     </li>
@@ -214,8 +235,7 @@ function TaskEditorForm({
               </ul>
             )}
           </fieldset>
-          <div className="space-y-1.5">
-            <Label htmlFor="task-link">Ссылка</Label>
+          <TaskField label="Link" hint="Optional" htmlFor="task-link">
             <Input
               id="task-link"
               type="url"
@@ -223,15 +243,15 @@ function TaskEditorForm({
               value={link}
               onChange={(event) => setLink(event.target.value)}
             />
-          </div>
+          </TaskField>
         </div>
       </DialogPanel>
       <DialogFooter>
-        <DialogClose render={<Button variant="ghost" size="sm" disabled={saving} />}>
-          Отмена
+        <DialogClose render={<Button variant="outline" size="sm" disabled={saving} />}>
+          Cancel
         </DialogClose>
         <Button type="submit" size="sm" disabled={!valid || saving || !canSave}>
-          {task ? "Сохранить" : "Создать"}
+          {task ? "Save task" : "Create task"}
         </Button>
       </DialogFooter>
     </form>

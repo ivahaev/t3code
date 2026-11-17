@@ -156,14 +156,14 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 const worktreePreparing = (taskId: TaskId) =>
   new TaskError({
-    message: "Worktree задачи ещё готовится. Попробуйте через минуту.",
+    message: "The task's worktree is still being prepared. Try again in a minute.",
     taskId,
     code: "worktree_preparing",
   });
 
 const worktreeFailed = (taskId: TaskId, detail: string | null | undefined) =>
   new TaskError({
-    message: `Worktree задачи не удалось подготовить${detail ? `: ${detail}` : "."} Новый чат создаст его заново.`,
+    message: `Couldn't prepare the task's worktree${detail ? `: ${detail}` : "."} The next thread will create it again.`,
     taskId,
   });
 
@@ -175,7 +175,8 @@ interface TaskLaunch {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
   readonly workspaceStrategy: ThreadLaunchService.ThreadLaunchWorkspaceStrategy;
-  readonly text: string;
+  /** Null opens the thread without a first message. */
+  readonly text: string | null;
   /** False keeps the task title; true lets the first message name the thread. */
   readonly generateTitle: boolean;
   readonly options: Pick<TaskStartInput, "modelSelection" | "runtimeMode" | "interactionMode">;
@@ -200,7 +201,7 @@ const make = Effect.gen(function* () {
   const requireTask = Effect.fn("TaskService.requireTask")(function* (id: TaskId) {
     const task = yield* store.get(id);
     if (task === null) {
-      return yield* new TaskError({ message: "Задача не найдена.", taskId: id, code: "not_found" });
+      return yield* new TaskError({ message: "Task not found.", taskId: id, code: "not_found" });
     }
     return task;
   });
@@ -427,12 +428,12 @@ const make = Effect.gen(function* () {
       .pipe(
         Effect.mapError(
           (cause) =>
-            new TaskError({ message: "Не удалось прочитать чат.", taskId: input.id, cause }),
+            new TaskError({ message: "Couldn't read the thread.", taskId: input.id, cause }),
         ),
       );
     if (shell === null || shell.deletedAt !== null) {
       return yield* new TaskError({
-        message: "Этого чата больше нет.",
+        message: "This thread no longer exists.",
         taskId: input.id,
         code: "not_found",
       });
@@ -457,7 +458,7 @@ const make = Effect.gen(function* () {
         const previous = owner === null || owner === task.id ? null : yield* store.get(owner);
         if (previous !== null && !input.moveFromOtherTask) {
           return yield* new TaskError({
-            message: "Этот чат уже в другой задаче.",
+            message: "This thread is already in another task.",
             taskId: previous.id,
             code: "already_attached",
           });
@@ -611,7 +612,7 @@ const make = Effect.gen(function* () {
   ) {
     const failed = (cause: { readonly message: string }) =>
       new TaskError({
-        message: `Не удалось запустить чат: ${cause.message}`,
+        message: `Couldn't start the thread: ${cause.message}`,
         taskId: task.id,
         cause,
       });
@@ -630,9 +631,11 @@ const make = Effect.gen(function* () {
         projectId: launch.projectId,
         title: task.title,
         ...(launch.generateTitle ? { generateTitle: true } : {}),
-        ...launch.options,
+        modelSelection: launch.options.modelSelection,
+        runtimeMode: launch.options.runtimeMode,
+        interactionMode: launch.options.interactionMode,
         workspaceStrategy: launch.workspaceStrategy,
-        initialMessage: { text: launch.text, attachments: [] },
+        ...(launch.text === null ? {} : { initialMessage: { text: launch.text, attachments: [] } }),
         createdBy: "user",
         creationSource: "server",
       })
@@ -853,7 +856,10 @@ const make = Effect.gen(function* () {
   ) {
     const project = yield* projects.getById(projectId).pipe(Effect.orElseSucceed(Option.none));
     if (Option.isNone(project)) {
-      return yield* new TaskError({ message: "Проект задачи недоступен.", taskId: task.id });
+      return yield* new TaskError({
+        message: "The task's project isn't available.",
+        taskId: task.id,
+      });
     }
     const created = yield* git
       .createWorktree({ cwd: project.value.workspaceRoot, refName: branch, path: null })
@@ -861,7 +867,7 @@ const make = Effect.gen(function* () {
         Effect.mapError(
           (cause) =>
             new TaskError({
-              message: `Не удалось снова открыть ветку задачи ${branch}: ${cause.message}`,
+              message: `Couldn't reopen the task's branch ${branch}: ${cause.message}`,
               taskId: task.id,
               cause,
             }),
@@ -946,16 +952,29 @@ const make = Effect.gen(function* () {
     yield* Effect.annotateCurrentSpan({ "task.id": input.id });
     const task = yield* requireTask(input.id);
     const projectId = task.primaryProjectId;
+    const launch = {
+      commandId: input.commandId,
+      text: input.sendDescription === false ? null : formatTaskPrompt(task),
+      generateTitle: false,
+      options: input,
+    };
+    if (task.threadIds[0] === undefined && input.worktree === false) {
+      const launched = yield* launchThread(task, {
+        ...launch,
+        projectId,
+        workspaceStrategy: { type: "root" },
+      });
+      return yield* recordThread(task.id, {
+        threadId: launched.threadId,
+        projectId,
+        worktree: null,
+        markInProgress: true,
+      });
+    }
     const shared =
       task.threadIds[0] === undefined
         ? yield* acquireShared({ task, projectId, commandId: input.commandId, forStart: true })
         : ({ type: "started", task, threadId: task.threadIds[0] } as const);
-    const launch = {
-      commandId: input.commandId,
-      text: formatTaskPrompt(task),
-      generateTitle: false,
-      options: input,
-    };
     switch (shared.type) {
       case "started": {
         // Review Focus 2: a started task only changes status again.
@@ -1038,7 +1057,7 @@ const make = Effect.gen(function* () {
       if (forExtra) {
         return yield* new TaskError({
           message:
-            "Общий worktree задачи создаётся, первый чат в нём уже запущен. Повторите через минуту, чтобы открыть отдельный worktree.",
+            "The task's shared worktree is being created and its first thread already started. Try again in a minute to open a separate worktree.",
           taskId: task.id,
           code: "shared_worktree_started",
         });
@@ -1114,7 +1133,7 @@ const make = Effect.gen(function* () {
     const cwd = project.value.workspaceRoot;
     const listed = yield* runGit(
       task.id,
-      "Не удалось получить список worktree проекта.",
+      "Couldn't list the project's worktrees.",
       vcs.listWorktreePaths(cwd),
     );
     const livePaths = new Set(yield* Effect.forEach(listed, canonicalPath));
@@ -1123,7 +1142,7 @@ const make = Effect.gen(function* () {
       Effect.mapError(
         (cause) =>
           new TaskError({
-            message: "Не удалось прочитать чаты проекта.",
+            message: "Couldn't read the project's threads.",
             taskId: task.id,
             cause,
           }),
@@ -1181,7 +1200,7 @@ const make = Effect.gen(function* () {
       .pipe(Effect.orElseSucceed(() => null));
     const checkedOut = yield* runGit(
       task.id,
-      "Не удалось узнать текущую ветку проекта.",
+      "Couldn't find the project's current branch.",
       currentBranch(cwd),
     );
     const protectedBranches = new Set(["main", "master"]);
@@ -1223,7 +1242,7 @@ const make = Effect.gen(function* () {
   ) {
     return yield* runGit(
       taskId,
-      `Не удалось проверить, слита ли ветка ${worktree.branch}.`,
+      `Couldn't check whether branch ${worktree.branch} is merged.`,
       Effect.gen(function* () {
         const baseCommit = yield* resolveBaseCommit(
           project.cwd,
@@ -1252,7 +1271,7 @@ const make = Effect.gen(function* () {
     if (project.paths.get(worktreePath)?.state !== "live") return 0;
     const status = yield* runGit(
       taskId,
-      "Не удалось прочитать изменения в worktree.",
+      "Couldn't read the changes in the worktree.",
       vcs.statusDetailsLocal(worktreePath),
     );
     const files = status.workingTree.files.length;
@@ -1333,9 +1352,7 @@ const make = Effect.gen(function* () {
     }
     const refuseRunning = (project: CleanupProject, path: string) =>
       project.paths.get(path)?.running === true
-        ? refuse(
-            `${path} остаётся: в нём сейчас работает агент задачи. Остановите его и повторите.`,
-          )
+        ? refuse(`${path} stays: the task's agent is working in it. Stop the agent and try again.`)
         : Effect.void;
     const removals: Array<Removal> = [];
     const selectedWorktrees = new Map(
@@ -1347,16 +1364,16 @@ const make = Effect.gen(function* () {
       );
       const project = worktree === undefined ? undefined : inspected.get(worktree.projectId);
       if (worktree === undefined || project === undefined) {
-        return yield* refuse(`${path} не является worktree этой задачи.`);
+        return yield* refuse(`${path} isn't a worktree of this task.`);
       }
       const blocker = worktreeBlocker(worktree, project);
-      if (blocker !== null) return yield* refuse(`${path} остаётся: ${blocker}.`);
+      if (blocker !== null) return yield* refuse(`${path} stays: ${blocker}.`);
       yield* refuseRunning(project, path);
       // Changes the user did not see in the preview are never discarded.
       const dirty = yield* dirtyFileCount(task.id, project, path);
       if (dirty > acceptedDirtyFileCount) {
         return yield* refuse(
-          `${path} остаётся: после проверки в нём появились новые изменения (незакоммиченных файлов: ${dirty}). Откройте уборку заново.`,
+          `${path} stays: it has new changes since the check (${dirty} uncommitted ${dirty === 1 ? "file" : "files"}). Open cleanup again.`,
         );
       }
       removals.push({
@@ -1388,7 +1405,7 @@ const make = Effect.gen(function* () {
       const record = branchRecords(records).find((worktree) => worktree.branch === selected.branch);
       const project = inspected.get(selected.projectId);
       if (record === undefined || project === undefined) {
-        return yield* refuse(`${selected.branch} не является веткой этой задачи.`);
+        return yield* refuse(`${selected.branch} isn't a branch of this task.`);
       }
       if (
         records.some(
@@ -1398,14 +1415,14 @@ const make = Effect.gen(function* () {
         return yield* worktreePreparing(task.id);
       }
       if (!isDeletableBranch(selected.branch, records, project)) {
-        return yield* refuse(`Ветка ${selected.branch} используется вне задачи и остаётся.`);
+        return yield* refuse(`Branch ${selected.branch} is used outside the task and stays.`);
       }
       const state = yield* mergeState(task.id, project, record);
       if (state.exists && !state.merged && !selected.force) {
         return yield* refuse(
           state.baseCommit === null
-            ? `Не удалось определить базовую ветку для ${selected.branch}; подтвердите удаление.`
-            : `В ветке ${selected.branch} есть неслитые коммиты (${state.unmergedCommitCount}); подтвердите удаление.`,
+            ? `Couldn't find the base branch for ${selected.branch}. Confirm to delete it.`
+            : `Branch ${selected.branch} has unmerged commits (${state.unmergedCommitCount}). Confirm to delete it.`,
         );
       }
       // Git cannot delete a branch while a worktree has it checked out, so that worktree goes too,
@@ -1418,7 +1435,7 @@ const make = Effect.gen(function* () {
         const dirty = yield* dirtyFileCount(task.id, project, path);
         if (dirty > 0) {
           return yield* refuse(
-            `Ветка ${selected.branch} остаётся: в ${path} есть незакоммиченные файлы (${dirty}); отметьте этот worktree, чтобы удалить его.`,
+            `Branch ${selected.branch} stays: ${path} has uncommitted files (${dirty}). Select that worktree to remove it.`,
           );
         }
         removals.push({
@@ -1453,7 +1470,7 @@ const make = Effect.gen(function* () {
             })
           : vcs.pruneWorktrees({ cwd: removal.project.cwd });
       const result = yield* Effect.result(
-        runGit(task.id, `Не удалось удалить ${removal.path}.`, effect),
+        runGit(task.id, `Couldn't remove ${removal.path}.`, effect),
       );
       if (Result.isSuccess(result)) removedPaths.add(removal.path);
       else failures.push(result.failure.message);
@@ -1473,7 +1490,7 @@ const make = Effect.gen(function* () {
           !removedPaths.has(removal.path),
       );
       if (blocked) {
-        failures.push(`Ветка ${deletion.branch} остаётся: её worktree не удалось удалить.`);
+        failures.push(`Branch ${deletion.branch} stays: its worktree couldn't be removed.`);
         continue;
       }
       if (!deletion.exists) {
@@ -1489,19 +1506,17 @@ const make = Effect.gen(function* () {
               ? null
               : yield* runGit(
                   task.id,
-                  `Не удалось проверить, слита ли ветка ${deletion.branch}.`,
+                  `Couldn't check whether branch ${deletion.branch} is merged.`,
                   branchMergeState(deletion.project.cwd, deletion.branch, deletion.baseCommit),
                 );
           if (state !== null && !state.exists) return;
           if ((state === null || !state.merged) && !deletion.force) {
-            return yield* refuse(
-              `В ветке ${deletion.branch} появились неслитые коммиты, она остаётся.`,
-            );
+            return yield* refuse(`Branch ${deletion.branch} has new unmerged commits and stays.`);
           }
           // "Merged" was checked against the task's base; `git branch -d` would check HEAD.
           yield* runGit(
             task.id,
-            `Не удалось удалить ветку ${deletion.branch}.`,
+            `Couldn't delete branch ${deletion.branch}.`,
             vcs.deleteLocalBranch({
               cwd: deletion.project.cwd,
               refName: deletion.branch,

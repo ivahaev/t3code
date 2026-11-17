@@ -290,7 +290,7 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
           ) : null}
           <SidebarUtilityItem
             icon={<SquareKanbanIcon />}
-            label="Задачи"
+            label="Tasks"
             onClick={handleTasksClick}
           />
           <SidebarUtilityItem

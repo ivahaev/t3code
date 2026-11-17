@@ -6,11 +6,13 @@ import { useContext, useState, type ReactNode } from "react";
 import { useProjects } from "~/state/entities";
 import { tasksEnvironment } from "~/state/tasks";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import {
   Dialog,
   DialogClose,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogPanel,
@@ -22,7 +24,7 @@ import {
   cleanupBranchKey,
   cleanupSelectionInput,
   initialCleanupSelection,
-  ruPlural,
+  plural,
   toggleBranch,
   toggleWorktree,
 } from "./taskCleanup.logic";
@@ -75,12 +77,12 @@ export function useMoveTaskToDone(): {
 }
 
 function dirtyLabel(count: number): string {
-  return `⚠ ${count} ${ruPlural(count, ["незакоммиченный файл", "незакоммиченных файла", "незакоммиченных файлов"])}`;
+  return `${count} ${plural(count, "uncommitted file", "uncommitted files")}`;
 }
 
 function unmergedLabel(count: number): string {
-  if (count === 0) return "⚠ не слита";
-  return `⚠ ${count} ${ruPlural(count, ["коммит не слит", "коммита не слиты", "коммитов не слиты"])}`;
+  if (count === 0) return "Not merged";
+  return `${count} ${plural(count, "unmerged commit", "unmerged commits")}`;
 }
 
 /** Offers to remove a finished task's worktrees and local branches. */
@@ -116,14 +118,14 @@ function TaskCleanupDialog({
     setBusy(true);
     if (always) {
       const result = await setTaskCleanupMode({ environmentId, input: { mode: "always" } });
-      toastTaskCommandFailure("Не удалось сохранить настройку уборки", result);
+      toastTaskCommandFailure("Couldn't save cleanup setting", result);
     }
     if (!nothingChecked) {
       const result = await cleanupTask({
         environmentId,
         input: { id: task.id, ...cleanupSelectionInput(preview, selection) },
       });
-      if (toastTaskCommandFailure("Не удалось убрать за задачей", result)) {
+      if (toastTaskCommandFailure("Couldn't clean up task", result)) {
         setBusy(false);
         return;
       }
@@ -140,14 +142,18 @@ function TaskCleanupDialog({
         if (!open && !busy) onClose();
       }}
     >
-      <DialogPopup className="max-w-lg">
+      <DialogPopup className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Задача «{task.title}» готова. Убрать за ней?</DialogTitle>
+          <DialogTitle>Clean up after “{task.title}”?</DialogTitle>
+          <DialogDescription>
+            The task is done. Remove its worktrees and local branches. Remote branches and the
+            task's threads stay.
+          </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <div className="flex flex-col gap-4">
             {preview.worktrees.length > 0 ? (
-              <CleanupGroup title="worktree">
+              <CleanupGroup title="Worktrees">
                 {preview.worktrees.map((worktree) => (
                   <CleanupRow
                     key={worktree.path}
@@ -157,7 +163,7 @@ function TaskCleanupDialog({
                     project={projectTitle(worktree.projectId)}
                     branch={worktree.branch}
                     status={
-                      worktree.dirtyFileCount === 0 ? "чисто" : dirtyLabel(worktree.dirtyFileCount)
+                      worktree.dirtyFileCount === 0 ? "Clean" : dirtyLabel(worktree.dirtyFileCount)
                     }
                     warning={worktree.dirtyFileCount > 0}
                   />
@@ -165,7 +171,7 @@ function TaskCleanupDialog({
               </CleanupGroup>
             ) : null}
             {preview.branches.length > 0 ? (
-              <CleanupGroup title="локальные ветки">
+              <CleanupGroup title="Local branches">
                 {preview.branches.map((branch) => {
                   const key = cleanupBranchKey(branch.projectId, branch.branch);
                   const base = baseName(branch.projectId, branch.branch);
@@ -180,8 +186,8 @@ function TaskCleanupDialog({
                       status={
                         branch.merged
                           ? base
-                            ? `слита в ${base}`
-                            : "слита"
+                            ? `Merged into ${base}`
+                            : "Merged"
                           : unmergedLabel(branch.unmergedCommitCount)
                       }
                       warning={!branch.merged}
@@ -197,21 +203,21 @@ function TaskCleanupDialog({
                   disabled={busy}
                   onCheckedChange={(checked) => setAlways(checked === true)}
                 />
-                Делать так всегда
+                Always clean up finished tasks
               </label>
             ) : null}
           </div>
         </DialogPanel>
         <DialogFooter>
-          <DialogClose render={<Button variant="ghost" size="sm" disabled={busy} />}>
-            Оставить
+          <DialogClose render={<Button variant="outline" size="sm" disabled={busy} />}>
+            Keep all
           </DialogClose>
           <Button
             size="sm"
             disabled={busy || (nothingChecked && !always)}
             onClick={() => void submit()}
           >
-            Убрать отмеченные
+            Clean up selected
           </Button>
         </DialogFooter>
       </DialogPopup>
@@ -227,9 +233,9 @@ function CleanupGroup({
   readonly children: ReactNode;
 }) {
   return (
-    <section className="flex flex-col gap-1">
-      <h3 className="text-xs text-muted-foreground">{title}</h3>
-      {children}
+    <section className="flex flex-col gap-1.5">
+      <h3 className="text-xs font-medium text-muted-foreground">{title}</h3>
+      <div className="divide-y divide-border/50 rounded-xl border border-border/70">{children}</div>
     </section>
   );
 }
@@ -252,19 +258,19 @@ function CleanupRow({
   readonly warning: boolean;
 }) {
   return (
-    <label className="flex cursor-pointer items-center gap-2 text-sm">
+    <label className="flex cursor-pointer items-center gap-2.5 px-3 py-2 text-sm hover:bg-accent/50">
       <Checkbox checked={checked} disabled={disabled} onCheckedChange={onToggle} />
-      <span className="w-24 shrink-0 truncate">{project}</span>
-      <span className="min-w-0 flex-1 truncate font-mono text-xs">{branch}</span>
-      <span
-        className={
-          warning
-            ? "shrink-0 text-xs text-warning-foreground"
-            : "shrink-0 text-xs text-muted-foreground"
-        }
-      >
-        {status}
+      <span className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate font-mono text-xs">{branch}</span>
+        <span className="truncate text-xs text-muted-foreground">{project}</span>
       </span>
+      {warning ? (
+        <Badge variant="warning" className="shrink-0">
+          {status}
+        </Badge>
+      ) : (
+        <span className="shrink-0 text-xs text-muted-foreground">{status}</span>
+      )}
     </label>
   );
 }

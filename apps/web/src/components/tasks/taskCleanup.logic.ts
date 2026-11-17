@@ -131,21 +131,16 @@ export function autoCleanupPlan(preview: TaskCleanupPreview): {
   };
 }
 
-/** Russian plural: `[one, few, many]` as in «1 ветка, 2 ветки, 5 веток». */
-export function ruPlural(count: number, forms: readonly [string, string, string]): string {
-  const mod10 = count % 10;
-  const mod100 = count % 100;
-  if (mod10 === 1 && mod100 !== 11) return forms[0];
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return forms[1];
-  return forms[2];
+export function plural(count: number, one: string, many: string): string {
+  return count === 1 ? one : many;
 }
 
 export function cleanupSummary(removedWorktrees: number, deletedBranches: number): string {
-  return `Удалено ${removedWorktrees} worktree, ${deletedBranches} ${ruPlural(deletedBranches, ["ветка", "ветки", "веток"])}`;
+  return `Removed ${removedWorktrees} ${plural(removedWorktrees, "worktree", "worktrees")} and ${deletedBranches} ${plural(deletedBranches, "branch", "branches")}`;
 }
 
 /**
- * Moving a task out of Done after its shared branch was deleted: the next chat starts the
+ * Moving a task out of Done after its shared branch was deleted: the next thread starts the
  * branch again from the base, so the user confirms first.
  */
 export function leavingDoneConfirmation(task: Task, status: TaskStatus): string | null {
@@ -153,6 +148,6 @@ export function leavingDoneConfirmation(task: Task, status: TaskStatus): string 
   return task.worktrees.some(
     (worktree) => worktree.kind === "shared" && worktree.branchDeletedAt !== null,
   )
-    ? "Ветка задачи удалена, новый чат создаст её заново от базы"
+    ? "The task's branch was deleted. The next thread will create it again from the base."
     : null;
 }

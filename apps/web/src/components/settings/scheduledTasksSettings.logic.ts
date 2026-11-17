@@ -391,6 +391,8 @@ export function scheduledTaskDefaultModel(
   settings: ServerSettings,
   project: (LegacyProjectSettingsFields & { readonly id: ProjectId }) | null,
   entries: readonly ProviderInstanceEntry[],
+  /** The model the user last picked in a composer, tried after the configured defaults. */
+  recent: ModelSelection | null = null,
 ): ModelSelection | null {
   const available = entries.filter(
     (entry) =>
@@ -401,7 +403,7 @@ export function scheduledTaskDefaultModel(
   );
   const configured = resolveProjectSettings(settings, project?.id ?? null, project).settings
     .defaultModelSelection;
-  for (const selection of [configured, settings.defaultModelSelection]) {
+  for (const selection of [configured, settings.defaultModelSelection, recent]) {
     if (
       selection &&
       available.some(

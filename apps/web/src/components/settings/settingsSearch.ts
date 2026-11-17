@@ -107,7 +107,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/browser": msg("Browser"),
   "/settings/devices": msg("Devices"),
   "/settings/scheduled-tasks": msg("Scheduled tasks"),
-  "/settings/tasks": msg("Задачи"),
+  "/settings/tasks": msg("Tasks"),
   "/settings/source-control": msg("Source control"),
   "/settings/worktrees": msg("Worktrees"),
   "/settings/connections": msg("Environments"),
@@ -1015,9 +1015,9 @@ export const SETTINGS_SEARCH_ITEMS = [
   },
   {
     id: "task-cleanup-mode",
-    title: "Уборка при переходе в «Готово»",
+    title: "Clean up when a task is done",
     to: "/settings/tasks",
-    searchTerms: ["задачи tasks board kanban worktree ветки branches cleanup done готово"],
+    searchTerms: ["tasks board kanban worktree branches cleanup done"],
   },
   {
     id: "agent-browser-access",

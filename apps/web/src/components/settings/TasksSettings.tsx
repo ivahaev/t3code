@@ -11,9 +11,9 @@ import { searchableSetting } from "./settingsSearch";
 import { useSettingsScope } from "./SettingsScopeContext";
 
 const CLEANUP_MODE_LABEL: Record<TaskCleanupMode, string> = {
-  ask: "Спрашивать",
-  always: "Всегда",
-  never: "Никогда",
+  ask: "Ask",
+  always: "Always",
+  never: "Never",
 };
 const CLEANUP_MODES = ["ask", "always", "never"] as const satisfies ReadonlyArray<TaskCleanupMode>;
 
@@ -22,10 +22,10 @@ export function TasksSettingsPanel() {
   const { connectedEnvironments } = useSettingsScope();
   return (
     <SettingsPageContainer>
-      <SettingsSection {...searchableSetting("task-cleanup-mode")} title="Задачи">
+      <SettingsSection {...searchableSetting("task-cleanup-mode")} title="Tasks">
         {connectedEnvironments.length === 0 ? (
           <p className="px-3 py-2 text-sm text-muted-foreground sm:px-4">
-            Нет подключённых environment.
+            No connected environments.
           </p>
         ) : (
           connectedEnvironments.map((environment) => (
@@ -56,15 +56,15 @@ function CleanupModeRow({
   });
   const change = async (next: TaskCleanupMode) => {
     const result = await setTaskCleanupMode({ environmentId, input: { mode: next } });
-    toastTaskCommandFailure("Не удалось сохранить настройку уборки", result);
+    toastTaskCommandFailure("Couldn't save cleanup setting", result);
   };
   return (
     <SettingsRow
-      title="Уборка при переходе в «Готово»"
+      title="Clean up when a task is done"
       description={
         <>
-          Убирать ли worktree и локальные ветки задачи, когда она переходит в «Готово». «Всегда»
-          молча убирает только чистые worktree и слитые ветки, об остальном спросит.
+          Whether to remove a task's worktrees and local branches when it moves to Done. Always
+          removes only clean worktrees and merged branches silently and asks about the rest.
           {environmentLabel === null ? null : ` Environment: ${environmentLabel}.`}
         </>
       }
@@ -78,10 +78,10 @@ function CleanupModeRow({
           <SelectTrigger
             size="sm"
             className="w-full sm:w-40"
-            aria-label="Уборка при переходе в «Готово»"
+            aria-label="Clean up when a task is done"
             disabled={mode === null || !canWrite}
           >
-            <SelectValue>{mode === null ? "Загрузка…" : CLEANUP_MODE_LABEL[mode]}</SelectValue>
+            <SelectValue>{mode === null ? "Loading…" : CLEANUP_MODE_LABEL[mode]}</SelectValue>
           </SelectTrigger>
           <SelectPopup align="end" alignItemWithTrigger={false}>
             {CLEANUP_MODES.map((option) => (

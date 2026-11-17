@@ -389,16 +389,27 @@ describe("scheduled task model defaults", () => {
   const resolve = (
     value: ServerConfig,
     project: { id: typeof projectId; defaultModelSelection?: typeof projectSelection } | null,
+    recent: typeof projectSelection | null = null,
   ) =>
     scheduledTaskDefaultModel(
       value.settings,
       project,
       deriveProviderInstanceEntries(value.providers),
+      recent,
     );
   it("uses the advertised default instead of catalog order when no default is configured", () => {
     expect(
       resolve({ ...config, settings: { ...config.settings, defaultModelSelection: null } }, null),
     ).toEqual({ instanceId, model: "catalog-default" });
+  });
+  it("prefers the recently picked model to the catalog, but not to a configured default", () => {
+    const recent = { instanceId, model: "first-model" };
+    const unconfigured = {
+      ...config,
+      settings: { ...config.settings, defaultModelSelection: null },
+    };
+    expect(resolve(unconfigured, null, recent)).toEqual(recent);
+    expect(resolve(config, null, recent)).toEqual(environmentSelection);
   });
   it("falls back to the environment default when the project provider is unavailable", () => {
     expect(

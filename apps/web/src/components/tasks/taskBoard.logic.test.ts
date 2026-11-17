@@ -55,11 +55,9 @@ describe("boardColumns", () => {
 
 describe("chatCountLabel", () => {
   it.each([
-    [1, "1 чат"],
-    [3, "3 чата"],
-    [5, "5 чатов"],
-    [11, "11 чатов"],
-    [21, "21 чат"],
+    [1, "1 thread"],
+    [3, "3 threads"],
+    [21, "21 threads"],
   ])("%i", (count, label) => {
     expect(chatCountLabel(count)).toBe(label);
   });

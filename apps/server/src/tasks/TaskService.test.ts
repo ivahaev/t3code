@@ -350,7 +350,7 @@ it.effect(
     const { layer, launches } = makeTestLayer();
     return Effect.gen(function* () {
       const tasks = yield* TaskService.TaskService;
-      const task = yield* newTask("Оплата картой");
+      const task = yield* newTask("Card payments");
       const started = yield* tasks.start({
         id: task.id,
         commandId: CommandId.make("start-1"),
@@ -359,21 +359,21 @@ it.effect(
       assert.strictEqual(launches.length, 1);
       const launch = launches[0]!;
       assert.strictEqual(launch.projectId, p1);
-      assert.strictEqual(launch.title, "Оплата картой");
+      assert.strictEqual(launch.title, "Card payments");
       assert.deepStrictEqual(launch.workspaceStrategy, {
         type: "worktree",
         baseRef: "origin/main",
-        branch: "task/oplata-kartoj",
+        branch: "task/card-payments",
         startFromOrigin: true,
       });
-      assert.isTrue(launch.initialMessage?.text.startsWith("Оплата картой"));
+      assert.isTrue(launch.initialMessage?.text.startsWith("Card payments"));
       assert.strictEqual(started.threadId, ThreadId.make("launched-start-1"));
       assert.strictEqual(started.task.status, "in_progress");
       assert.deepStrictEqual(started.task.threadIds, [started.threadId]);
       assert.deepStrictEqual(started.task.worktrees, [
         {
           projectId: p1,
-          branch: "task/oplata-kartoj",
+          branch: "task/card-payments",
           baseRef: "origin/main",
           kind: "shared",
           worktreePath: null,
@@ -396,6 +396,27 @@ it.effect(
     }).pipe(Effect.provide(layer));
   },
 );
+
+it.effect("start without a worktree or description opens an empty thread in the checkout", () => {
+  const { layer, launches } = makeTestLayer();
+  return Effect.gen(function* () {
+    const tasks = yield* TaskService.TaskService;
+    const task = yield* newTask("Plain start");
+    const started = yield* tasks.start({
+      id: task.id,
+      commandId: CommandId.make("plain-start"),
+      ...launchOptions,
+      worktree: false,
+      sendDescription: false,
+    });
+    const launch = launches[0]!;
+    assert.deepStrictEqual(launch.workspaceStrategy, { type: "root" });
+    assert.strictEqual(launch.initialMessage, undefined);
+    assert.strictEqual(started.task.status, "in_progress");
+    assert.deepStrictEqual(started.task.threadIds, [started.threadId]);
+    assert.deepStrictEqual(started.task.worktrees, []);
+  }).pipe(Effect.provide(layer));
+});
 
 it.effect("newThread waits for the shared worktree path, then reuses it", () => {
   const { layer, launches, shells } = makeTestLayer();
@@ -681,7 +702,7 @@ it.effect("a shared worktree whose preparation failed is dropped with a clear er
       tasks.newThread(sharedRequest(task.id, "after-broken")),
     );
     assert.notStrictEqual(error.code, "worktree_preparing");
-    assert.include(error.message, "не удалось подготовить");
+    assert.include(error.message, "Couldn't prepare");
     assert.include(error.message, "setup script exited 1");
     const recreated = yield* tasks.newThread(sharedRequest(task.id, "recreate"));
     const strategy = launches[1]!.workspaceStrategy;

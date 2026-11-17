@@ -28,13 +28,13 @@ export interface TaskThreadGroup<T> {
   readonly available: boolean;
   /** The shared worktree first, then the extra ones. */
   readonly worktrees: TaskWorktreeThreads<T>[];
-  /** Chats in the project root, or on a branch the task does not track. */
+  /** Threads in the project root, or on a branch the task does not track. */
   readonly rootThreads: T[];
 }
 
 /**
- * One block per repository of the task, primary first. A chat belongs to a task worktree when
- * it is in the same project on the same branch; the chat itself knows its branch.
+ * One block per repository of the task, primary first. A thread belongs to a task worktree when
+ * it is in the same project on the same branch; the thread itself knows its branch.
  */
 export function groupTaskThreads<T extends TaskThreadShell>(
   task: Task,
@@ -129,9 +129,9 @@ export function worktreeDiffState<E>(
   formatError: (failure: AsyncResult.Failure<ReviewDiffPreviewResult, E>) => string,
 ): WorktreeDiffState {
   const errors: string[] = [];
-  if (branch._tag === "Failure") errors.push(`Коммиты ветки: ${formatError(branch)}`);
+  if (branch._tag === "Failure") errors.push(`Branch commits: ${formatError(branch)}`);
   if (workingTree._tag === "Failure") {
-    errors.push(`Незакоммиченные изменения: ${formatError(workingTree)}`);
+    errors.push(`Uncommitted changes: ${formatError(workingTree)}`);
   }
   return {
     branch: AsyncResult.getOrElse(branch, () => null),
@@ -180,21 +180,21 @@ export function taskErrorCode(error: unknown): TaskErrorCode | null {
 }
 
 /**
- * Why the task cannot start its first chat, or null when it can. The start opens the shared
+ * Why the task cannot start its first thread, or null when it can. The start opens the shared
  * worktree in the primary project, so that project must be one this client sees.
  */
 export function taskStartBlocker(
   task: Task,
   availableProjectIds: ReadonlySet<ProjectId>,
 ): string | null {
-  if (task.archivedAt !== null) return "Задача в архиве.";
+  if (task.archivedAt !== null) return "The task is archived.";
   if (!availableProjectIds.has(task.primaryProjectId)) {
-    return "Основной проект задачи недоступен в этом environment.";
+    return "The task's main project isn't available in this environment.";
   }
   return null;
 }
 
-/** The repository a new chat starts in: the primary one when available, or none at all. */
+/** The repository a new thread starts in: the primary one when available, or none at all. */
 export function defaultNewThreadProject(
   task: Task,
   availableProjectIds: ReadonlySet<ProjectId>,
@@ -212,7 +212,7 @@ export interface AttachCandidate {
   readonly deletedAt: string | null;
 }
 
-/** Chats that can join the task, matching the query by title, branch or project, newest first. */
+/** Threads that can join the task, matching the query by title, branch or project, newest first. */
 export function attachCandidates<T extends AttachCandidate>(
   shells: ReadonlyArray<T>,
   input: {

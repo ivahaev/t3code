@@ -42,18 +42,14 @@ import {
   CheckIcon,
   CircleAlertIcon,
   CircleCheckIcon,
-  CircleDashedIcon,
-  CircleDotDashedIcon,
   ClockIcon,
   GitBranchIcon,
-  MessageCircleQuestionIcon,
+  SquareKanbanIcon,
   PinIcon,
   PinOffIcon,
-  ShieldQuestionIcon,
   SquarePenIcon,
   TerminalIcon,
   Undo2Icon,
-  UserRoundIcon,
   XIcon,
 } from "lucide-react";
 import {
@@ -78,6 +74,7 @@ import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 import { formatRelativeTimeLabel, parseTimestampDate } from "../../timestampFormat";
 import type { SidebarThreadSummary } from "../../types";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
+import { resolveThreadTopStatus, TopStatusIcon } from "./threadTopStatus";
 import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
@@ -115,7 +112,7 @@ import { makeWorkspaceFileDropHandlers } from "../chat/workspaceFileDrop";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { getTriggerDisplayModelName } from "../chat/providerIconUtils";
 import { shouldShowInstanceBadge, type ProviderInstanceEntry } from "../../providerInstances";
-import { ThreadTaskChip } from "../tasks/ThreadTaskChip";
+import { ThreadTaskChip, useThreadTask } from "../tasks/ThreadTaskChip";
 import { useThreadRunningTerminalIds } from "../../state/terminalSessions";
 import { InlineButton } from "../ui/button";
 import { Kbd } from "../ui/kbd";
@@ -145,7 +142,7 @@ function compactSidebarTimeLabel(label: string): string {
 
 // Subscribes to the minute tick itself, so only the label re-renders each
 // minute. The minute is passed as the clock so it is the formatter's input.
-function RelativeTimeLabel(props: { timestamp: string | null }) {
+export function RelativeTimeLabel(props: { timestamp: string | null }) {
   const nowMinute = useNowMinute();
   return props.timestamp === null
     ? null
@@ -248,6 +245,7 @@ function SidebarThreadTooltip({
   branchMismatch,
   terminalStatus,
   terminalProcessCount,
+  taskTitle,
 }: {
   thread: SidebarThreadSummary;
   project: ProjectFaviconProject | null;
@@ -265,6 +263,7 @@ function SidebarThreadTooltip({
   } | null;
   terminalStatus: TerminalStatusIndicator | null;
   terminalProcessCount: number;
+  taskTitle: string | null;
 }) {
   const driverKind = providerEntry?.driverKind ?? null;
   const previousProviderNames = thread.providerInstanceHistory
@@ -302,6 +301,12 @@ function SidebarThreadTooltip({
           <div className="flex min-w-0 items-center gap-2">
             <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
             <MiddleTruncate value={thread.branch} className="flex" />
+          </div>
+        ) : null}
+        {taskTitle !== null ? (
+          <div className="flex min-w-0 items-center gap-2">
+            <SquareKanbanIcon className="size-3 shrink-0 stroke-muted-foreground" />
+            <div className="min-w-0 truncate text-foreground/75">{taskTitle}</div>
           </div>
         ) : null}
         {branchMismatch ? (
@@ -530,22 +535,6 @@ const dropVerbBadge: Record<SidebarDropVerb, ReactNode> = {
   ),
 };
 
-const TOP_STATUS_ICONS = {
-  working: CircleDashedIcon,
-  waiting: CircleDotDashedIcon,
-  input: MessageCircleQuestionIcon,
-  request: UserRoundIcon,
-  approval: ShieldQuestionIcon,
-  failed: CircleAlertIcon,
-  done: CircleCheckIcon,
-  woke: AlarmClockIcon,
-} as const;
-
-function TopStatusIcon(props: { icon: keyof typeof TOP_STATUS_ICONS; className: string }) {
-  const Icon = TOP_STATUS_ICONS[props.icon];
-  return <Icon aria-hidden className={cn("shrink-0", props.className)} />;
-}
-
 type SidebarThreadRowProps = {
   thread: SidebarThreadSummary;
   // "folder" is a one-line row inside a boring sidebar project folder;
@@ -732,6 +721,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     ? resolveThreadCurrentPullRequestLink(thread.pullRequests)
     : null;
 
+  const task = useThreadTask(thread.environmentId, thread.id);
   const isUnread = hasUnseenCompletion({ ...thread, lastVisitedAt });
   const status = resolveSidebarRowStatus({ ...thread, lastVisitedAt });
   const lastVisitedDate = lastVisitedAt === undefined ? null : parseTimestampDate(lastVisitedAt);
@@ -747,67 +737,12 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     isActive: props.isActive,
     isSelected,
   });
-  const topStatus =
-    status === "preparing" || status === "working"
-      ? {
-          label:
-            status === "preparing"
-              ? "Setting up"
-              : thread.goal?.status === "active"
-                ? "Goal"
-                : "Working",
-          icon: "working" as const,
-          className: "text-info-foreground",
-        }
-      : status === "waiting"
-        ? {
-            label: "Waiting",
-            icon: "waiting" as const,
-            className: "text-muted-foreground",
-          }
-        : status === "approval"
-          ? {
-              label: "Approval",
-              icon: "approval" as const,
-              className: "text-warning-foreground",
-            }
-          : status === "input"
-            ? {
-                label: "Input",
-                icon: "input" as const,
-                className: "text-indigo-600 dark:text-indigo-300",
-              }
-            : status === "request"
-              ? {
-                  label: "Request",
-                  icon: "request" as const,
-                  className: "text-guest-foreground",
-                }
-              : status === "limited"
-                ? {
-                    label: "Limited",
-                    icon: "failed" as const,
-                    className: "text-warning-foreground",
-                  }
-                : status === "failed"
-                  ? {
-                      label: "Failed",
-                      icon: "failed" as const,
-                      className: "text-error-foreground",
-                    }
-                  : isWoke
-                    ? {
-                        label: "Woke",
-                        icon: "woke" as const,
-                        className: "text-warning-foreground",
-                      }
-                    : isUnread
-                      ? {
-                          label: "Done",
-                          icon: "done" as const,
-                          className: "text-success-foreground",
-                        }
-                      : null;
+  const topStatus = resolveThreadTopStatus({
+    status,
+    isUnread,
+    isWoke,
+    goalActive: thread.goal?.status === "active",
+  });
   const isWokeStatus = topStatus?.icon === "woke";
 
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
@@ -848,6 +783,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       branchMismatch={branchMismatch}
       terminalStatus={terminalStatus}
       terminalProcessCount={terminalProcessCount}
+      taskTitle={task?.title ?? null}
     />
   );
 
@@ -1159,7 +1095,13 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         <EnvironmentMachineIcon aria-hidden kind={props.environmentMachine} className="size-3.5" />
       </span>
     ) : null;
-  const taskChip = <ThreadTaskChip environmentId={thread.environmentId} threadId={thread.id} />;
+  const taskChip = (
+    <ThreadTaskChip environmentId={thread.environmentId} task={task} layout="chip" />
+  );
+  // Rows with room for a second line give the task its own line instead of squeezing the branch.
+  const taskLine = (
+    <ThreadTaskChip environmentId={thread.environmentId} task={task} layout="line" />
+  );
   const diff = latestRunDiff(thread);
   // Only the trailing icons would remain, so the row moves them to the title line instead.
   const metaLineEmpty =
@@ -1189,7 +1131,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       ) : (
         <span className="flex-1" />
       )}
-      {taskChip}
       {terminalStatusIcon}
       {prBadge}
       {diff ? (
@@ -1212,7 +1153,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
   );
   const titleLineIcons = metaLineEmpty ? (
     <>
-      {taskChip}
       <span aria-hidden className="inline-flex shrink-0 items-center gap-1">
         {remoteMachineIcon}
         <SidebarProviderStack
@@ -1234,6 +1174,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
         className={cn(
           "list-none [content-visibility:auto] [contain-intrinsic-size:auto_--spacing(9)]",
           metaLine !== null && multiline && "[contain-intrinsic-size:auto_--spacing(13.5)]",
+          task !== null &&
+            multiline &&
+            (metaLine !== null
+              ? "[contain-intrinsic-size:auto_--spacing(18)]"
+              : "[contain-intrinsic-size:auto_--spacing(13.5)]"),
           sortable?.isDragging && "relative z-20",
         )}
       >
@@ -1414,6 +1359,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               {props.sweepAction !== null ? dragDestination : null}
             </div>
             {multiline ? metaLine : null}
+            {multiline ? taskLine : null}
           </TooltipTrigger>
           {detailsTooltip}
         </Tooltip>
@@ -1430,6 +1376,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       // that have not rendered yet, so a hint off by a pixel lands it a pixel short per row above.
       className={cn(
         "list-none py-0.5 [content-visibility:auto] [contain-intrinsic-size:auto_78px]",
+        task !== null && "[contain-intrinsic-size:auto_96px]",
         metaLineEmpty && "[contain-intrinsic-size:auto_60px]",
         sortable?.isDragging && "relative z-20",
       )}
@@ -1458,6 +1405,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           <div
             className={cn(
               "relative z-10 h-[4.875rem] px-(--sidebar-row-content-inset) py-(--sidebar-content-inset)",
+              task !== null && "h-24",
               metaLineEmpty && "h-auto",
             )}
           >
@@ -1622,6 +1570,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
               {titleLineIcons}
             </div>
             {metaLine}
+            {taskLine}
           </div>
         </TooltipTrigger>
         {detailsTooltip}
@@ -1702,6 +1651,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
     gitStatus.data,
   );
   const checkoutThread = withoutRemovedCheckout(thread, visibleGitStatus);
+  const task = useThreadTask(thread.environmentId, thread.id);
   const branchMismatch = resolveLocalCheckoutBranchMismatch({
     effectiveEnvMode: thread.worktreePath === null ? "local" : "worktree",
     activeWorktreePath: thread.worktreePath,
@@ -1837,6 +1787,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
           branchMismatch={branchMismatch}
           terminalStatus={terminalStatus}
           terminalProcessCount={runningTerminalIds.length}
+          taskTitle={task?.title ?? null}
         />
       </Tooltip>
     </li>

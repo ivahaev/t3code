@@ -18,7 +18,7 @@ const taskWorktree = (overrides: Partial<TaskWorktree>): TaskWorktree => ({
 
 const makeTask = (overrides: Partial<Task>): Task => ({
   id: TaskId.make("task:pay"),
-  title: "Оплата картой",
+  title: "Card payments",
   description: "",
   link: null,
   status: "done",
@@ -80,8 +80,8 @@ describe("threadTaskIndex", () => {
 
 describe("taskChipLabel", () => {
   it("keeps short titles and cuts long ones to 12 characters", () => {
-    expect(taskChipLabel("Оплата")).toBe("Оплата");
-    expect(taskChipLabel("Оплата картой")).toBe("Оплата карт…");
-    expect(Array.from(taskChipLabel("Оплата картой в приложении"))).toHaveLength(12);
+    expect(taskChipLabel("Payments")).toBe("Payments");
+    expect(taskChipLabel("Card payments")).toBe("Card paymen…");
+    expect(Array.from(taskChipLabel("Card payments in the app"))).toHaveLength(12);
   });
 });

@@ -7,10 +7,12 @@ import { requestConfirmDialog } from "~/confirmDialog";
 import { useProjects, useThreadShells } from "~/state/entities";
 import { tasksEnvironment } from "~/state/tasks";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { ProjectFavicon, type ProjectFaviconProject } from "../ProjectFavicon";
 import { Button } from "../ui/button";
 import {
   Dialog,
   DialogClose,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogPanel,
@@ -23,7 +25,7 @@ import { attachCandidates, taskErrorCode } from "./taskDetail.logic";
 
 const RESULT_LIMIT = 50;
 
-/** Finds a chat of the task's environment and attaches it, moving it from another task if asked. */
+/** Finds a thread of the task's environment and attaches it, moving it from another task if asked. */
 export function TaskAttachThreadDialog({
   environmentId,
   task,
@@ -39,11 +41,8 @@ export function TaskAttachThreadDialog({
   const attachTaskThread = useAtomCommand(tasksEnvironment.attachTaskThread, {
     label: "task attach thread",
   });
-  const projectTitles = new Map(
-    useProjects()
-      .filter((project) => project.environmentId === environmentId)
-      .map((project) => [project.id, project.title]),
-  );
+  const projects = useProjects().filter((project) => project.environmentId === environmentId);
+  const projectTitles = new Map(projects.map((project) => [project.id, project.title]));
   const candidates = attachCandidates(
     useThreadShells().filter((shell) => shell.environmentId === environmentId),
     { task, query, projectTitles, limit: RESULT_LIMIT },
@@ -60,7 +59,7 @@ export function TaskAttachThreadDialog({
       result._tag === "Failure" &&
       taskErrorCode(squashAtomCommandFailure(result)) === "already_attached"
     ) {
-      const message = "Чат уже привязан к другой задаче. Перенести его в эту?";
+      const message = "This thread belongs to another task. Move it to this one?";
       const confirmed = (await requestConfirmDialog(message)) ?? window.confirm(message);
       if (!confirmed) {
         setBusy(false);
@@ -72,7 +71,7 @@ export function TaskAttachThreadDialog({
       });
     }
     setBusy(false);
-    if (toastTaskCommandFailure("Не удалось привязать чат", result)) return;
+    if (toastTaskCommandFailure("Couldn't attach thread", result)) return;
     onClose();
   };
 
@@ -83,22 +82,23 @@ export function TaskAttachThreadDialog({
         if (!open && !busy) onClose();
       }}
     >
-      <DialogPopup className="max-w-lg">
+      <DialogPopup className="max-w-xl">
         <DialogHeader>
-          <DialogTitle>Привязать чат</DialogTitle>
+          <DialogTitle>Attach thread</DialogTitle>
+          <DialogDescription>Add an existing thread to “{task.title}”.</DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <div className="flex flex-col gap-3">
             <Input
               autoFocus
               type="search"
-              aria-label="Поиск чата"
-              placeholder="Название, ветка или проект"
+              aria-label="Search threads"
+              placeholder="Search by title, branch or project"
               value={query}
               onChange={(event) => setQuery(event.target.value)}
             />
             {candidates.length === 0 ? (
-              <p className="text-sm text-muted-foreground">Подходящих чатов нет.</p>
+              <p className="text-sm text-muted-foreground">No matching threads.</p>
             ) : (
               <ul className="-mx-2 flex max-h-80 flex-col overflow-y-auto">
                 {candidates.map((shell) => (
@@ -107,12 +107,17 @@ export function TaskAttachThreadDialog({
                       type="button"
                       disabled={busy || !canAttach}
                       onClick={() => void attach(shell.id)}
-                      className="flex w-full min-w-0 flex-col items-start rounded-md px-2 py-1.5 text-start hover:bg-accent focus-visible:bg-accent focus-visible:outline-none disabled:opacity-64"
+                      className="flex w-full min-w-0 items-start gap-2.5 rounded-md px-2 py-1.5 text-start hover:bg-accent focus-visible:bg-accent focus-visible:outline-none disabled:opacity-64"
                     >
-                      <span className="w-full truncate text-sm">{shell.title}</span>
-                      <span className="w-full truncate text-xs text-muted-foreground">
-                        {projectTitles.get(shell.projectId) ?? shell.projectId}
-                        {shell.branch ? ` · ${shell.branch}` : ""}
+                      <ThreadProjectIcon
+                        project={projects.find((project) => project.id === shell.projectId)}
+                      />
+                      <span className="flex min-w-0 flex-1 flex-col">
+                        <span className="truncate text-sm">{shell.title}</span>
+                        <span className="truncate text-xs text-muted-foreground">
+                          {projectTitles.get(shell.projectId) ?? shell.projectId}
+                          {shell.branch ? ` · ${shell.branch}` : ""}
+                        </span>
                       </span>
                     </button>
                   </li>
@@ -122,11 +127,19 @@ export function TaskAttachThreadDialog({
           </div>
         </DialogPanel>
         <DialogFooter>
-          <DialogClose render={<Button variant="ghost" size="sm" disabled={busy} />}>
-            Закрыть
+          <DialogClose render={<Button variant="outline" size="sm" disabled={busy} />}>
+            Close
           </DialogClose>
         </DialogFooter>
       </DialogPopup>
     </Dialog>
+  );
+}
+
+function ThreadProjectIcon({ project }: { readonly project: ProjectFaviconProject | undefined }) {
+  return (
+    <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center">
+      {project ? <ProjectFavicon project={project} className="size-4" /> : null}
+    </span>
   );
 }

@@ -88,6 +88,10 @@ export const TaskStartInput = Schema.Struct({
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
+  /** False starts the first thread in the project's checkout. Older clients omit it: true. */
+  worktree: Schema.optional(Schema.Boolean),
+  /** False opens an empty thread instead of sending the task's title and description. */
+  sendDescription: Schema.optional(Schema.Boolean),
 });
 export type TaskStartInput = typeof TaskStartInput.Type;
 

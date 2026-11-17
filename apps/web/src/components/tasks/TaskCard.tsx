@@ -1,12 +1,14 @@
 import { useDraggable } from "@dnd-kit/core";
-import type { TaskStatus } from "@t3tools/contracts";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import type { TaskStatus, ThreadId } from "@t3tools/contracts";
 import { Link } from "@tanstack/react-router";
 import { MoreHorizontalIcon, PlayIcon } from "lucide-react";
 
 import { cn } from "~/lib/utils";
+import { buildThreadRouteParams } from "~/threadRoutes";
+import { TopStatusIcon, type ThreadTopStatus } from "../sidebar/threadTopStatus";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../ui/menu";
-import { taskAttentionLabel, type TaskAttention } from "./taskAttention.logic";
 import {
   boardTaskKey,
   chatCountLabel,
@@ -16,12 +18,13 @@ import {
   type BoardTask,
 } from "./taskBoard.logic";
 
-const ATTENTION_CLASS_NAME = {
-  attention: "text-warning-foreground",
-  failed: "text-destructive-foreground",
-  unread: "text-success-foreground",
-  working: "text-info-foreground",
-} as const;
+export interface TaskCardThread {
+  readonly id: ThreadId;
+  readonly title: string;
+  readonly status: ThreadTopStatus | null;
+}
+
+const VISIBLE_THREADS = 5;
 
 export interface TaskCardActions {
   readonly onMove: (entry: BoardTask, status: TaskStatus) => void;
@@ -37,14 +40,15 @@ export interface TaskCardActions {
 export function TaskCard({
   entry,
   projectNames,
-  attention,
+  threads,
   canEdit,
   refocus,
   actions,
 }: {
   readonly entry: BoardTask;
   readonly projectNames: ReadonlyArray<string>;
-  readonly attention: TaskAttention;
+  /** The task's threads this client has loaded, in task order. */
+  readonly threads: ReadonlyArray<TaskCardThread>;
   readonly canEdit: boolean;
   /** Set on the card the keyboard just moved, which remounts in its new column. */
   readonly refocus: boolean;
@@ -57,7 +61,7 @@ export function TaskCard({
     data: entry,
     disabled: !canEdit || archived,
   });
-  const flag = taskAttentionLabel(attention);
+  const hiddenThreads = task.threadIds.length - Math.min(threads.length, VISIBLE_THREADS);
   const moveBy = (step: -1 | 1) => {
     const next = neighborStatus(task.status, step);
     if (next !== null) actions.onKeyboardMove(entry, next);
@@ -105,15 +109,44 @@ export function TaskCard({
         <TaskCardMenu entry={entry} canEdit={canEdit} actions={actions} />
       </div>
       {projectNames.length > 0 ? (
-        <p className="truncate text-xs text-muted-foreground">{projectNames.join(" ")}</p>
+        <p className="truncate text-xs text-muted-foreground">{projectNames.join(" · ")}</p>
       ) : null}
-      {task.threadIds.length > 0 || flag !== null || (task.status === "backlog" && !archived) ? (
+      {threads.length > 0 ? (
+        <ul className="-mx-1 flex flex-col">
+          {threads.slice(0, VISIBLE_THREADS).map((thread) => (
+            <li key={thread.id}>
+              <Link
+                to="/$environmentId/$threadId"
+                params={buildThreadRouteParams(scopeThreadRef(entry.environmentId, thread.id))}
+                className="flex min-w-0 items-center gap-1.5 rounded-md px-1 py-0.5 text-xs text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:bg-accent focus-visible:outline-none"
+              >
+                <span className="min-w-0 flex-1 truncate">{thread.title}</span>
+                {thread.status ? (
+                  <span
+                    className={cn(
+                      "flex shrink-0 items-center gap-1 font-medium",
+                      thread.status.className,
+                    )}
+                  >
+                    <TopStatusIcon icon={thread.status.icon} className="size-3" />
+                    {thread.status.label}
+                  </span>
+                ) : null}
+              </Link>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {hiddenThreads > 0 || (task.status === "backlog" && !archived) ? (
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          {task.threadIds.length > 0 ? <span>{chatCountLabel(task.threadIds.length)}</span> : null}
-          {flag !== null && attention !== null ? (
-            <span className={ATTENTION_CLASS_NAME[attention]}>
-              {flag.glyph} {flag.text}
-            </span>
+          {hiddenThreads > 0 ? (
+            <Link
+              to="/tasks/$environmentId/$taskId"
+              params={{ environmentId: entry.environmentId, taskId: task.id }}
+              className="hover:text-foreground hover:underline"
+            >
+              +{chatCountLabel(hiddenThreads)}
+            </Link>
           ) : null}
           {task.status === "backlog" && !archived ? (
             <Button
@@ -123,7 +156,8 @@ export function TaskCard({
               disabled={!canEdit}
               onClick={() => actions.onMove(entry, "in_progress")}
             >
-              <PlayIcon />В работу
+              <PlayIcon />
+              Start
             </Button>
           ) : null}
         </div>
@@ -150,7 +184,7 @@ function TaskCardMenu({
           <Button
             size="icon-xs"
             variant="ghost-muted"
-            aria-label={`Действия: ${task.title}`}
+            aria-label={`Actions for ${task.title}`}
             disabled={!canEdit}
           />
         }
@@ -162,18 +196,18 @@ function TaskCardMenu({
           ? null
           : TASK_STATUSES.filter((status) => status !== task.status).map((status) => (
               <MenuItem key={status} onClick={() => actions.onMove(entry, status)}>
-                Перенести в {TASK_STATUS_LABEL[status]}
+                Move to {TASK_STATUS_LABEL[status]}
               </MenuItem>
             ))}
-        {archived ? null : <MenuItem onClick={() => actions.onEdit(entry)}>Изменить</MenuItem>}
+        {archived ? null : <MenuItem onClick={() => actions.onEdit(entry)}>Edit</MenuItem>}
         {archived ? null : <MenuSeparator />}
         {archived ? (
-          <MenuItem onClick={() => actions.onUnarchive(entry)}>Вернуть из архива</MenuItem>
+          <MenuItem onClick={() => actions.onUnarchive(entry)}>Restore</MenuItem>
         ) : (
-          <MenuItem onClick={() => actions.onArchive(entry)}>Архивировать</MenuItem>
+          <MenuItem onClick={() => actions.onArchive(entry)}>Archive</MenuItem>
         )}
         <MenuItem variant="destructive" onClick={() => actions.onDelete(entry)}>
-          Удалить
+          Delete
         </MenuItem>
       </MenuPopup>
     </Menu>

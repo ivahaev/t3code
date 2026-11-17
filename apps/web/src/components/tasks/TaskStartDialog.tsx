@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   clampManagedRuntimeMode,
   CommandId,
@@ -10,8 +11,10 @@ import {
   type Task,
 } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
+import { useComposerDraftStore } from "~/composerDraftStore";
 import { useEnvironmentSettings } from "~/hooks/useSettings";
 import { randomUUID } from "~/lib/utils";
 import { getCustomModelOptionsByInstance } from "~/modelSelection";
@@ -21,6 +24,7 @@ import { useManagedPolicy } from "~/state/managedPolicy";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "~/state/server";
 import { tasksEnvironment } from "~/state/tasks";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { buildThreadRouteParams } from "~/threadRoutes";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { scheduledTaskDefaultModel } from "../settings/scheduledTasksSettings.logic";
 import { Button } from "../ui/button";
@@ -34,10 +38,10 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
-import { Label } from "../ui/label";
 import { toastTaskCommandFailure } from "./taskCommandToast";
+import { TaskField, TaskSwitchRow } from "./taskDialogParts";
 
-/** The agent, model and runtime mode a task chat starts with: the project's defaults until picked. */
+/** The agent, model and runtime mode a task thread starts with: the project's defaults until picked. */
 export function useTaskAgentChoice(environmentId: EnvironmentId, projectId: ProjectId) {
   const [picked, setPicked] = useState<ModelSelection | null>(null);
   const project =
@@ -49,10 +53,16 @@ export function useTaskAgentChoice(environmentId: EnvironmentId, projectId: Proj
     useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
   const managedPolicy = useManagedPolicy(environmentId);
   const instanceEntries = providerInstanceEntriesFor(providers, settings, projectId);
+  // Like a new thread's composer: the last model the user picked, unless a default is configured.
+  const recent = useComposerDraftStore((state) =>
+    state.stickyActiveProvider === null
+      ? null
+      : (state.stickyModelSelectionByProvider[state.stickyActiveProvider] ?? null),
+  );
   const selection =
     picked !== null && instanceEntries.some((entry) => entry.instanceId === picked.instanceId)
       ? picked
-      : scheduledTaskDefaultModel(settings, project, instanceEntries);
+      : scheduledTaskDefaultModel(settings, project, instanceEntries, recent);
   const instanceId =
     selection?.instanceId ?? instanceEntries[0]?.instanceId ?? ProviderInstanceId.make("");
   const model = selection?.model ?? "";
@@ -87,26 +97,27 @@ export function TaskAgentPicker({
   readonly picker: ReturnType<typeof useTaskAgentChoice>["picker"];
 }) {
   return (
-    <div className="flex flex-col gap-1.5">
-      <Label>Агент и модель</Label>
-      <ProviderModelPicker
-        environmentId={environmentId}
-        disabled={disabled}
-        activeInstanceId={picker.instanceId}
-        model={picker.model}
-        lockedProvider={null}
-        instanceEntries={picker.instanceEntries}
-        modelOptionsByInstance={picker.modelOptionsByInstance}
-        isComposerOwned={false}
-        onInstanceModelChange={(nextInstanceId, nextModel) =>
-          picker.onPick({ instanceId: nextInstanceId, model: nextModel })
-        }
-      />
-    </div>
+    <TaskField label="Agent">
+      <div className="flex">
+        <ProviderModelPicker
+          environmentId={environmentId}
+          disabled={disabled}
+          activeInstanceId={picker.instanceId}
+          model={picker.model}
+          lockedProvider={null}
+          instanceEntries={picker.instanceEntries}
+          modelOptionsByInstance={picker.modelOptionsByInstance}
+          isComposerOwned={false}
+          onInstanceModelChange={(nextInstanceId, nextModel) =>
+            picker.onPick({ instanceId: nextInstanceId, model: nextModel })
+          }
+        />
+      </div>
+    </TaskField>
   );
 }
 
-/** Starts a backlog task: the server opens its worktree and first chat with the chosen agent. */
+/** Starts a backlog task: the server opens its first thread, then the thread opens here. */
 export function TaskStartDialog({
   environmentId,
   task,
@@ -116,16 +127,20 @@ export function TaskStartDialog({
   readonly task: Task;
   readonly onClose: () => void;
 }) {
+  const navigate = useNavigate();
   const [starting, setStarting] = useState(false);
+  const [worktree, setWorktree] = useState(true);
+  const [sendDescription, setSendDescription] = useState(true);
   const { project, selection, runtimeMode, picker } = useTaskAgentChoice(
     environmentId,
     task.primaryProjectId,
   );
   const canStart = useAtomValue(tasksEnvironment.startTask.permissionAtom(environmentId));
   const startTask = useAtomCommand(tasksEnvironment.startTask, { label: "task start" });
+  const ready = !starting && selection !== null && canStart && project !== null;
 
   const start = async () => {
-    if (starting || selection === null || !canStart || project === null) return;
+    if (!ready) return;
     setStarting(true);
     const result = await startTask({
       environmentId,
@@ -135,11 +150,19 @@ export function TaskStartDialog({
         modelSelection: selection,
         runtimeMode,
         interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        worktree,
+        sendDescription,
       },
     });
     setStarting(false);
-    if (toastTaskCommandFailure("Не удалось взять задачу в работу", result)) return;
+    if (toastTaskCommandFailure("Couldn't start task", result)) return;
     onClose();
+    if (result._tag === "Success") {
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: buildThreadRouteParams(scopeThreadRef(environmentId, result.value.threadId)),
+      });
+    }
   };
 
   return (
@@ -149,34 +172,55 @@ export function TaskStartDialog({
         if (!open && !starting) onClose();
       }}
     >
-      <DialogPopup className="max-w-md">
-        <DialogHeader>
-          <DialogTitle>В работу: {task.title}</DialogTitle>
-          <DialogDescription>
-            Задача получит свой worktree в {project?.title ?? "основном репозитории"}, первый чат
-            начнётся с её описания.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogPanel>
-          {project === null ? (
-            <p role="alert" className="mb-3 text-sm text-destructive-foreground">
-              Основной проект задачи недоступен в этом environment.
-            </p>
-          ) : null}
-          <TaskAgentPicker environmentId={environmentId} disabled={starting} picker={picker} />
-        </DialogPanel>
-        <DialogFooter>
-          <DialogClose render={<Button variant="ghost" size="sm" disabled={starting} />}>
-            Отмена
-          </DialogClose>
-          <Button
-            size="sm"
-            disabled={starting || selection === null || !canStart || project === null}
-            onClick={() => void start()}
-          >
-            В работу
-          </Button>
-        </DialogFooter>
+      <DialogPopup className="max-w-xl">
+        <form
+          className="flex min-h-0 flex-col"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void start();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Start task</DialogTitle>
+            <DialogDescription>
+              Opens the first thread for “{task.title}” in {project?.title ?? "its main project"}.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            <div className="flex flex-col gap-5">
+              {project === null ? (
+                <p role="alert" className="text-sm text-destructive-foreground">
+                  The task's main project isn't available in this environment.
+                </p>
+              ) : null}
+              <TaskAgentPicker environmentId={environmentId} disabled={starting} picker={picker} />
+              <TaskSwitchRow
+                id="task-start-worktree"
+                label="New worktree"
+                description="Work on a task branch in its own worktree. Off runs in the project's current checkout."
+                checked={worktree}
+                disabled={starting}
+                onCheckedChange={setWorktree}
+              />
+              <TaskSwitchRow
+                id="task-start-description"
+                label="Start with the task description"
+                description="Send the task's title and description as the first message. Off opens an empty thread."
+                checked={sendDescription}
+                disabled={starting}
+                onCheckedChange={setSendDescription}
+              />
+            </div>
+          </DialogPanel>
+          <DialogFooter>
+            <DialogClose render={<Button variant="outline" size="sm" disabled={starting} />}>
+              Cancel
+            </DialogClose>
+            <Button type="submit" size="sm" disabled={!ready}>
+              {starting ? "Starting…" : "Start"}
+            </Button>
+          </DialogFooter>
+        </form>
       </DialogPopup>
     </Dialog>
   );

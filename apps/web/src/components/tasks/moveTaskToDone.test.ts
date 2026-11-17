@@ -23,7 +23,7 @@ const environmentId = EnvironmentId.make("local");
 const backend = ProjectId.make("project-backend");
 const task: Task = {
   id: TaskId.make("task:pay"),
-  title: "Оплата картой",
+  title: "Card payments",
   description: "",
   link: null,
   status: "review",
@@ -117,7 +117,7 @@ describe("moveTaskToDone", () => {
       },
     });
     expect(toasts).toEqual([
-      expect.objectContaining({ type: "success", title: "Удалено 1 worktree, 0 веток" }),
+      expect.objectContaining({ type: "success", title: "Removed 1 worktree and 0 branches" }),
     ]);
     expect(deps.openCleanupDialog).toHaveBeenCalledWith({
       environmentId,

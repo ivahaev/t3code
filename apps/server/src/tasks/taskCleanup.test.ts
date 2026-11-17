@@ -514,7 +514,7 @@ it.live("cleanup keeps a worktree that changed after the preview or has a runnin
           branches: [],
         })
         .pipe(Effect.flip);
-      assert.include(changed.message, "изменени");
+      assert.include(changed.message, "new changes");
       assert.isTrue(yield* fileSystem.exists(path.join(changedPath, "late.txt")));
       // Once the user has seen and accepted the change, the worktree goes with it.
       const accepted = yield* tasks.cleanup({
@@ -531,7 +531,7 @@ it.live("cleanup keeps a worktree that changed after the preview or has a runnin
           branches: [],
         })
         .pipe(Effect.flip);
-      assert.include(running.message, "агент");
+      assert.include(running.message, "agent");
       assert.isTrue(yield* fileSystem.exists(runningPath));
     }).pipe(
       Effect.provide(tasksLayer(repo, [shell("th-running", runningPath, "task/b", null, "run-1")])),

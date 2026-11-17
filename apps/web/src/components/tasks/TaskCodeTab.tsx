@@ -1,6 +1,8 @@
 import type { CodeViewDiffItem } from "@pierre/diffs";
 import type { ReviewDiffPreviewSource, TaskWorktree } from "@t3tools/contracts";
 
+import { GitBranchIcon, RefreshCwIcon } from "lucide-react";
+
 import { useClientSettings } from "~/hooks/useSettings";
 import { useRenderedAppearance } from "~/hooks/useTheme";
 import {
@@ -13,6 +15,8 @@ import { PREFERRED_HIGHLIGHTER } from "~/lib/syntaxHighlighting";
 import { DiffStatLabel } from "../chat/DiffStatLabel";
 import { StyledDiffCodeView } from "../diffs/StyledDiffCodeView";
 import { Badge } from "../ui/badge";
+import { Button } from "../ui/button";
+import { plural } from "./taskCleanup.logic";
 import { worktreeDiffStat, type WorktreeDiffState } from "./taskDetail.logic";
 
 /** One task worktree with its two previews: commits since the base, then uncommitted work. */
@@ -22,7 +26,7 @@ export interface TaskWorktreeDiff extends WorktreeDiffState {
   readonly worktree: TaskWorktree;
 }
 
-// The task page re-renders on every chat update; a source's patch is parsed once per theme.
+// The task page re-renders on every thread update; a source's patch is parsed once per theme.
 const parsedSources = new WeakMap<ReviewDiffPreviewSource, Map<string, RenderablePatch | null>>();
 
 function parseSource(source: ReviewDiffPreviewSource, cacheKey: string): RenderablePatch | null {
@@ -47,10 +51,12 @@ interface FileLabel {
 export function TaskCodeTab({
   diffs,
   unavailable,
+  onRefresh,
 }: {
   readonly diffs: ReadonlyArray<TaskWorktreeDiff>;
   /** Why this connection shows no diffs, such as missing file access. */
   readonly unavailable: string | null;
+  readonly onRefresh: () => void;
 }) {
   const resolvedTheme = useRenderedAppearance();
   const diffLayout = useClientSettings((settings) => settings.diffLayout);
@@ -70,7 +76,7 @@ export function TaskCodeTab({
         if (patch !== null) {
           const files = source.files?.length;
           unparsed.push(
-            `${diff.projectTitle} · ${diff.worktree.branch}${files ? ` (${files} файл.)` : ""}`,
+            `${diff.projectTitle} · ${diff.worktree.branch}${files ? ` (${files} ${plural(files, "file", "files")})` : ""}`,
           );
         }
         continue;
@@ -88,43 +94,49 @@ export function TaskCodeTab({
   }
 
   const summary = (
-    <div className="flex flex-col gap-1 border-b px-(--workspace-gutter-start) py-2 text-sm">
-      {diffs.map((diff) => {
-        const stat = worktreeDiffStat([diff.branch, diff.workingTree]);
-        return (
-          <div key={diff.key} className="flex min-w-0 items-center gap-2">
-            <span className="shrink-0 font-medium">{diff.projectTitle}</span>
-            <span className="min-w-0 truncate font-mono text-xs text-muted-foreground">
-              {diff.worktree.branch}
-            </span>
-            {diff.errors.map((error) => (
-              <span key={error} className="min-w-0 truncate text-xs text-destructive-foreground">
-                {error}
+    <div className="flex items-start gap-2 border-b px-(--workspace-gutter-start) py-2 text-sm">
+      <div className="flex min-w-0 flex-1 flex-col gap-1">
+        {diffs.map((diff) => {
+          const stat = worktreeDiffStat([diff.branch, diff.workingTree]);
+          return (
+            <div key={diff.key} className="flex min-w-0 items-center gap-2">
+              <span className="shrink-0 font-medium">{diff.projectTitle}</span>
+              <GitBranchIcon className="size-3 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 truncate text-xs text-muted-foreground">
+                {diff.worktree.branch}
               </span>
-            ))}
-            {stat !== null ? (
-              <DiffStatLabel
-                additions={stat.additions}
-                deletions={stat.deletions}
-                layout="inline"
-                className="ms-auto text-xs"
-              />
-            ) : diff.errors.length === 0 ? (
-              <span className="text-xs text-muted-foreground">загрузка…</span>
-            ) : null}
-          </div>
-        );
-      })}
-      {truncated.length > 0 ? (
-        <p className="text-xs text-muted-foreground">
-          Дифф слишком большой и показан не полностью: {[...new Set(truncated)].join(", ")}
-        </p>
-      ) : null}
-      {unparsed.length > 0 ? (
-        <p className="text-xs text-muted-foreground">
-          Не удалось показать дифф: {unparsed.join(", ")}
-        </p>
-      ) : null}
+              {diff.errors.map((error) => (
+                <span key={error} className="min-w-0 truncate text-xs text-destructive-foreground">
+                  {error}
+                </span>
+              ))}
+              {stat !== null ? (
+                <DiffStatLabel
+                  additions={stat.additions}
+                  deletions={stat.deletions}
+                  layout="inline"
+                  className="ms-auto text-xs"
+                />
+              ) : diff.errors.length === 0 ? (
+                <span className="text-xs text-muted-foreground">Loading…</span>
+              ) : null}
+            </div>
+          );
+        })}
+        {truncated.length > 0 ? (
+          <p className="text-xs text-muted-foreground">
+            Diff too large, shown in part: {[...new Set(truncated)].join(", ")}
+          </p>
+        ) : null}
+        {unparsed.length > 0 ? (
+          <p className="text-xs text-muted-foreground">
+            Couldn't show the diff: {unparsed.join(", ")}
+          </p>
+        ) : null}
+      </div>
+      <Button size="icon-xs" variant="ghost" aria-label="Refresh diff" onClick={onRefresh}>
+        <RefreshCwIcon />
+      </Button>
     </div>
   );
 
@@ -138,7 +150,7 @@ export function TaskCodeTab({
   if (diffs.length === 0) {
     return (
       <p className="px-(--workspace-gutter-start) py-6 text-sm text-muted-foreground">
-        У задачи нет worktree с изменениями.
+        The task has no worktrees with changes.
       </p>
     );
   }
@@ -148,7 +160,7 @@ export function TaskCodeTab({
       <div className="flex min-h-0 flex-1 flex-col">
         {summary}
         <p className="px-(--workspace-gutter-start) py-6 text-sm text-muted-foreground">
-          {loaded ? "Изменений нет." : "Загрузка изменений…"}
+          {loaded ? "No changes." : "Loading changes…"}
         </p>
       </div>
     );
@@ -168,7 +180,7 @@ export function TaskCodeTab({
               <span className="font-mono">{label.branch}</span>
               {label.uncommitted ? (
                 <Badge variant="outline" size="sm">
-                  не закоммичено
+                  Uncommitted
                 </Badge>
               ) : null}
             </span>
